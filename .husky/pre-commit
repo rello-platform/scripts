@@ -1,0 +1,12 @@
+#!/usr/bin/env sh
+# Dogfood: the package gates its own package.json against the floating-refs
+# rule it exports. The package itself doesn't have @rello-platform/* deps
+# today (it's the root of the canonicalized-script chain), but the gate
+# is wired so any future dep added here is held to the same pinning
+# discipline every consumer is held to.
+#
+# `roles` is not dogfooded — the package has no `src/` (no role-string
+# surface). `db-apply-sql` is not dogfooded — the package has no
+# `prisma/sql/` directory. Their behavior is exercised by the test harness.
+
+node bin/rello-scripts floating-refs

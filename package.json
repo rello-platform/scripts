@@ -1,0 +1,22 @@
+{
+  "name": "@rello-platform/scripts",
+  "version": "0.1.0",
+  "description": "Canonical CLI for cross-consumer Rello platform scripts (gates + operational tooling). Single source of truth for check-floating-refs, check-hardcoded-roles, and db-apply-sql.",
+  "bin": {
+    "rello-scripts": "bin/rello-scripts"
+  },
+  "files": [
+    "bin",
+    "scripts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "bash test/run-tests.sh"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rello-platform/scripts.git"
+  },
+  "license": "UNLICENSED"
+}

@@ -1,0 +1,59 @@
+#!/usr/bin/env node
+// Canonical CLI for @rello-platform/scripts.
+// Routes subcommands to bundled bash scripts under scripts/.
+//
+// Subcommands:
+//   floating-refs   — gate: rejects floating/non-canonical @rello-platform/* refs in package.json
+//   roles           — gate: rejects hardcoded lead-facing role labels in src/
+//   db-apply-sql    — operational: applies prisma/sql/*.sql files via prisma db execute
+//
+// Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
+// criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
+// in the consumer's CWD and propagates its exit status verbatim.
+
+"use strict";
+
+const { spawnSync } = require("child_process");
+const path = require("path");
+
+const SUBCOMMANDS = {
+  "floating-refs": "check-floating-refs.sh",
+  "roles": "check-hardcoded-roles.sh",
+  "db-apply-sql": "db-apply-sql.sh",
+};
+
+const args = process.argv.slice(2);
+const subcommand = args[0];
+
+if (!subcommand || subcommand === "--help" || subcommand === "-h") {
+  process.stdout.write(
+    "Usage: rello-scripts <subcommand> [args...]\n" +
+    "\n" +
+    "Subcommands:\n" +
+    "  floating-refs [package.json]               Gate: reject floating @rello-platform/* refs\n" +
+    "  roles                                      Gate: reject hardcoded lead-facing role labels in src/\n" +
+    "  db-apply-sql [schema] [sql-dir]            Apply prisma/sql/*.sql via prisma db execute\n"
+  );
+  process.exit(subcommand ? 0 : 2);
+}
+
+const scriptName = SUBCOMMANDS[subcommand];
+if (!scriptName) {
+  process.stderr.write(`ERROR: unknown subcommand '${subcommand}'.\n`);
+  process.stderr.write(`Subcommands: ${Object.keys(SUBCOMMANDS).join(", ")}\n`);
+  process.exit(2);
+}
+
+const scriptPath = path.join(__dirname, "..", "scripts", scriptName);
+const passthrough = args.slice(1);
+const result = spawnSync("bash", [scriptPath, ...passthrough], {
+  stdio: "inherit",
+  cwd: process.cwd(),
+});
+
+if (result.error) {
+  process.stderr.write(`ERROR: failed to spawn bash: ${result.error.message}\n`);
+  process.exit(1);
+}
+
+process.exit(result.status === null ? 1 : result.status);
