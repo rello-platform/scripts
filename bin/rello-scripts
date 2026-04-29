@@ -10,10 +10,14 @@
 // Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
 // criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
 // in the consumer's CWD and propagates its exit status verbatim.
+//
+// v0.2.0 — adds --root <path> flag for floating-refs + roles subcommands.
+// Backward-compatible: defaults preserve v0.1.0 behavior on every input.
 
 "use strict";
 
 const { spawnSync } = require("child_process");
+const fs = require("fs");
 const path = require("path");
 
 const SUBCOMMANDS = {
@@ -21,6 +25,10 @@ const SUBCOMMANDS = {
   "roles": "check-hardcoded-roles.sh",
   "db-apply-sql": "db-apply-sql.sh",
 };
+
+// Subcommands that accept --root <path>. `db-apply-sql` uses positional args
+// per PA-049's locked contract, so it is excluded.
+const ROOT_AWARE = new Set(["floating-refs", "roles"]);
 
 const args = process.argv.slice(2);
 const subcommand = args[0];
@@ -30,9 +38,13 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "Usage: rello-scripts <subcommand> [args...]\n" +
     "\n" +
     "Subcommands:\n" +
-    "  floating-refs [package.json]               Gate: reject floating @rello-platform/* refs\n" +
-    "  roles                                      Gate: reject hardcoded lead-facing role labels in src/\n" +
-    "  db-apply-sql [schema] [sql-dir]            Apply prisma/sql/*.sql via prisma db execute\n"
+    "  floating-refs [--root <dir>] [package.json]   Gate: reject floating @rello-platform/* refs\n" +
+    "  roles [--root <dir>]                          Gate: reject hardcoded lead-facing role labels\n" +
+    "  db-apply-sql [schema] [sql-dir]               Apply prisma/sql/*.sql via prisma db execute\n" +
+    "\n" +
+    "Flags:\n" +
+    "  --root <path>   floating-refs: directory containing package.json (default: .)\n" +
+    "                  roles: directory to scan for source files (default: src)\n"
   );
   process.exit(subcommand ? 0 : 2);
 }
@@ -44,8 +56,34 @@ if (!scriptName) {
   process.exit(2);
 }
 
-const scriptPath = path.join(__dirname, "..", "scripts", scriptName);
+// Pre-validate --root for root-aware subcommands so we can return a friendly
+// error message at exit code 2 BEFORE spawning bash. The .sh scripts also
+// validate (defense-in-depth), but failing fast at the CLI keeps error
+// messages consistent and avoids a cryptic shell error when the directory
+// is missing.
 const passthrough = args.slice(1);
+if (ROOT_AWARE.has(subcommand)) {
+  const rootIndex = passthrough.indexOf("--root");
+  if (rootIndex !== -1) {
+    const rootPath = passthrough[rootIndex + 1];
+    if (!rootPath || rootPath.startsWith("--")) {
+      process.stderr.write("ERROR: --root requires a path argument.\n");
+      process.exit(2);
+    }
+    const resolved = path.resolve(process.cwd(), rootPath);
+    if (!fs.existsSync(resolved)) {
+      process.stderr.write(`ERROR: --root path does not exist: ${rootPath}\n`);
+      process.exit(2);
+    }
+    const stat = fs.statSync(resolved);
+    if (!stat.isDirectory()) {
+      process.stderr.write(`ERROR: --root path is not a directory: ${rootPath}\n`);
+      process.exit(2);
+    }
+  }
+}
+
+const scriptPath = path.join(__dirname, "..", "scripts", scriptName);
 const result = spawnSync("bash", [scriptPath, ...passthrough], {
   stdio: "inherit",
   cwd: process.cwd(),

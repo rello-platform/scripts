@@ -12,11 +12,50 @@
 #   - github:rello-platform/<pkg>#<branch-name>    (any non-tag-non-sha ref)
 #   - github:rello-platform/<pkg>#<short-sha>      (under 40 hex chars)
 #
+# v0.2.0 — accepts optional `--root <dir>` flag (resolves to <dir>/package.json).
+# Backward-compatible: existing positional package.json arg still works.
+#
 # Spec: PERMISSIONS-CANONICALIZATION.md Phase 0; Locks #1 + #4.
 
 set -euo pipefail
 
-PKG="${1:-package.json}"
+PKG=""
+ROOT=""
+POSITIONAL=()
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --root)
+      if [ -z "${2:-}" ]; then
+        printf 'ERROR: --root requires a path argument\n' >&2
+        exit 2
+      fi
+      ROOT="$2"
+      shift 2
+      ;;
+    --root=*)
+      ROOT="${1#--root=}"
+      shift
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [ -n "$ROOT" ]; then
+  if [ ! -d "$ROOT" ]; then
+    printf 'ERROR: --root path does not exist or is not a directory: %s\n' "$ROOT" >&2
+    exit 2
+  fi
+  PKG="${ROOT%/}/package.json"
+elif [ "${#POSITIONAL[@]}" -gt 0 ]; then
+  PKG="${POSITIONAL[0]}"
+else
+  PKG="package.json"
+fi
+
 if [ ! -f "$PKG" ]; then
   printf 'ERROR: %s not found\n' "$PKG" >&2
   exit 2

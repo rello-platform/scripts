@@ -23,7 +23,7 @@ Pin via `github:` in the consumer's `package.json` (matches the platform's `@rel
 ```json
 {
   "devDependencies": {
-    "@rello-platform/scripts": "github:rello-platform/scripts#v0.1.0"
+    "@rello-platform/scripts": "github:rello-platform/scripts#v0.2.0"
   }
 }
 ```
@@ -33,15 +33,26 @@ Then `npm install`.
 ## Usage
 
 ```sh
-npx rello-scripts floating-refs               # defaults to scanning ./package.json
+npx rello-scripts floating-refs                       # defaults to scanning ./package.json
 npx rello-scripts floating-refs path/to/package.json
+npx rello-scripts floating-refs --root path/to/dir    # scans <dir>/package.json (v0.2.0)
 
-npx rello-scripts roles                       # scans ./src for hardcoded role labels
-                                              # consults ./scripts/check-hardcoded-roles.allowlist (optional)
+npx rello-scripts roles                               # scans ./src for hardcoded role labels
+                                                      # consults ./scripts/check-hardcoded-roles.allowlist (optional)
+npx rello-scripts roles --root src/jobs               # non-standard layout (e.g. engines) (v0.2.0)
 
-npx rello-scripts db-apply-sql                # defaults: ./prisma/schema.prisma + ./prisma/sql
+npx rello-scripts db-apply-sql                        # defaults: ./prisma/schema.prisma + ./prisma/sql
 npx rello-scripts db-apply-sql ./schema.prisma ./sql
 ```
+
+### `--root <path>` (v0.2.0)
+
+Both `floating-refs` and `roles` accept an optional `--root <path>` flag for repos with non-standard layouts:
+
+- `floating-refs --root <dir>` resolves to `<dir>/package.json`. Default: `./package.json`. Backward-compatible: the legacy positional package.json arg still works when `--root` is not provided.
+- `roles --root <dir>` scans `<dir>/` for source files instead of `./src/`. Default: `src`. Engine-class repos (e.g. Milo-Engine using `src/jobs/`) pass an explicit root.
+
+If the `--root` path does not exist or is not a directory, both subcommands exit `2` with a friendly error.
 
 ### Wire into husky pre-commit
 

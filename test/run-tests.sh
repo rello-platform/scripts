@@ -21,6 +21,13 @@
 #     - violation in src/, not allowlisted     → exit 1
 #     - violation in src/, allowlisted         → exit 0
 #     - missing allowlist + clean src/         → exit 0
+#     - --root src/jobs, violation             → exit 1   (v0.2.0)
+#     - --root src/jobs, clean                 → exit 0   (v0.2.0)
+#     - --root /nonexistent                    → exit 2   (v0.2.0)
+#
+#   floating-refs (--root flag, v0.2.0):
+#     - --root <dir-with-pinned-package.json>  → exit 0
+#     - --root /nonexistent                    → exit 2
 #
 #   db-apply-sql:
 #     - missing schema arg              → exit 2
@@ -171,6 +178,59 @@ TXT
 export const greet = (name: string) => `Hello, ${name}`;
 TS
   assert_exit "missing allowlist + clean src/" "0" "$(run_in_fixture "$TMP/roles-no-allowlist" roles)"
+
+  # 10a. --root src/jobs with violation — exit 1
+  mkdir -p "$TMP/roles-root-violation/src/jobs"
+  cat > "$TMP/roles-root-violation/src/jobs/handler.ts" <<'TS'
+export const ROLE_LABEL = "Real Estate Broker";
+TS
+  assert_exit "--root src/jobs, violation" "1" "$(run_in_fixture "$TMP/roles-root-violation" roles --root src/jobs)"
+
+  # 10b. --root src/jobs with clean tree — exit 0
+  mkdir -p "$TMP/roles-root-clean/src/jobs"
+  cat > "$TMP/roles-root-clean/src/jobs/handler.ts" <<'TS'
+export const greet = (name: string) => `Hello, ${name}`;
+TS
+  assert_exit "--root src/jobs, clean" "0" "$(run_in_fixture "$TMP/roles-root-clean" roles --root src/jobs)"
+
+  # 10c. --root with missing path — exit 2 + friendly message
+  mkdir -p "$TMP/roles-root-missing"
+  assert_exit "--root /nonexistent" "2" "$(run_in_fixture "$TMP/roles-root-missing" roles --root /nonexistent)"
+
+  local missing_root_msg
+  missing_root_msg="$(run_in_fixture_capture "$TMP/roles-root-missing" roles --root /nonexistent || true)"
+  if printf '%s' "$missing_root_msg" | grep -q "ERROR: --root path does not exist"; then
+    printf '  PASS  --root /nonexistent prints friendly error\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  --root /nonexistent missing friendly error; got: %s\n' "$missing_root_msg"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # 10d. roles default (no --root) still works — regression check
+  mkdir -p "$TMP/roles-default-regression/src"
+  cat > "$TMP/roles-default-regression/src/badge.ts" <<'TS'
+export const ROLE_LABEL = "Real Estate Broker";
+TS
+  assert_exit "default (no --root) regression" "1" "$(run_in_fixture "$TMP/roles-default-regression" roles)"
+
+  printf '\nfloating-refs --root\n'
+
+  # 10e. floating-refs --root <dir-with-pinned-package.json> — exit 0
+  mkdir -p "$TMP/fr-root/sub"
+  cat > "$TMP/fr-root/sub/package.json" <<'JSON'
+{
+  "name": "fixture",
+  "devDependencies": {
+    "@rello-platform/permissions": "github:rello-platform/permissions#v0.3.0"
+  }
+}
+JSON
+  assert_exit "--root <subdir>" "0" "$(run_in_fixture "$TMP/fr-root" floating-refs --root sub)"
+
+  # 10f. floating-refs --root /nonexistent — exit 2
+  mkdir -p "$TMP/fr-root-missing"
+  assert_exit "floating-refs --root /nonexistent" "2" "$(run_in_fixture "$TMP/fr-root-missing" floating-refs --root /nonexistent)"
 
   printf '\ndb-apply-sql\n'
 
