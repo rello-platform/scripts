@@ -5,6 +5,8 @@ Canonical CLI for cross-consumer Rello platform scripts (gates + operational too
 - `floating-refs` — gate that rejects floating or non-canonical `@rello-platform/*` refs in `package.json` (formerly `scripts/check-floating-refs.sh`).
 - `roles` — gate that rejects hardcoded lead-facing role labels in `src/` (formerly `scripts/check-hardcoded-roles.sh`).
 - `db-apply-sql` — operational tooling that applies `prisma/sql/*.sql` files via `prisma db execute` (formerly `scripts/db-apply-sql.sh`).
+- `pre-delete-grep-gate` — pre-commit gate enforcing PLATFORM-CLASS-LEVEL-RULES.md Rule J: deletion-bearing commits cite pre-flight grep evidence in the message body. Ships at warn (v0.3.0); promotion to error gated on Kelly authorization OR 14-day soak.
+- `schema-change-reminder` — pre-commit advisory: when `prisma/schema.prisma` is staged, prompts the author to confirm `prisma migrate diff --exit-code` was run and verification lines are pasted in the commit body. Always advisory (never blocks).
 
 ## Provenance
 
@@ -23,7 +25,7 @@ Pin via `github:` in the consumer's `package.json` (matches the platform's `@rel
 ```json
 {
   "devDependencies": {
-    "@rello-platform/scripts": "github:rello-platform/scripts#v0.2.0"
+    "@rello-platform/scripts": "github:rello-platform/scripts#v0.3.0"
   }
 }
 ```
@@ -58,8 +60,13 @@ If the `--root` path does not exist or is not a directory, both subcommands exit
 
 ```sh
 # .husky/pre-commit
+npx lint-staged
 npx rello-scripts floating-refs
 npx rello-scripts roles   # only if the consumer adopts the roles gate
+
+# v0.3.0 — Rule J + schema-change discipline:
+npx rello-scripts pre-delete-grep-gate
+npx rello-scripts schema-change-reminder
 ```
 
 ### Wire into package.json scripts
@@ -120,6 +127,34 @@ Exit codes:
 - `0` — all files applied successfully, OR sql directory exists but is empty
 - `1` — any `prisma db execute` invocation returned non-zero (propagated immediately)
 - `2` — schema file not found OR sql directory not found
+
+### `pre-delete-grep-gate` (v0.3.0)
+
+Pre-commit gate enforcing PLATFORM-CLASS-LEVEL-RULES.md Rule J. When the staged commit deletes ≥1 file, the gate grep-checks the prepared commit message (`.git/COMMIT_EDITMSG`) for one of:
+
+- `Rule J: <evidence>`
+- `Pre-Delete grep: <evidence>`
+- `pre-flight grep: <evidence>`
+
+Severity ramp:
+- v0.3.0 ships at **warn** — prints message but exits 0.
+- Promotion to **error** (exit 1) gated on Kelly authorization OR 14-day soak (whichever later) per `feedback-pre-launch-no-interrupting-gates`.
+
+Suppress: `RELLO_SKIP_PREDELETE_GREP=1`. Skipped in CI (`CI=true`).
+
+Exit codes (current — warn mode):
+- `0` — no deletes, OR deletes + grep evidence, OR deletes + missing evidence (warn)
+
+### `schema-change-reminder` (v0.3.0)
+
+Pre-commit advisory. When `prisma/schema.prisma` is staged, the script grep-checks the commit message for evidence that the schema-change ritual (`~/.claude/standards/db-schema-changes.md`) ran:
+
+- `prisma migrate diff` AND `No difference detected`, OR
+- `Verification:` AND both `tsc --noEmit` AND `migrate diff`.
+
+If absent, prints a one-screen reminder. **Always advisory — never blocks.** Schema-change discipline is a 7-step ritual; one CLI hook can't verify all 7 — it can only prompt.
+
+Suppress: `RELLO_SKIP_SCHEMA_REMINDER=1`. Skipped in CI.
 
 ## Versioning
 

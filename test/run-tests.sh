@@ -273,6 +273,65 @@ PRISMA
   # 16. --help — exit 0
   assert_exit "--help" "0" "$(run_in_fixture "$TMP" --help)"
 
+  printf '\npre-delete-grep-gate (v0.3.0)\n'
+
+  # P1. fixture with no deletes — exit 0
+  mkdir -p "$TMP/predel-clean"
+  ( cd "$TMP/predel-clean" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt && git add a.txt && git commit -q -m "init" )
+  assert_exit "no deletes — exit 0" "0" "$(run_in_fixture "$TMP/predel-clean" pre-delete-grep-gate)"
+
+  # P2. fixture with staged delete + no Rule J evidence — exit 0 (warn mode)
+  mkdir -p "$TMP/predel-warn"
+  ( cd "$TMP/predel-warn" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt b.txt && git add a.txt b.txt && git commit -q -m "init" \
+      && git rm -q a.txt && printf 'deleting a\n' > .git/COMMIT_EDITMSG )
+  assert_exit "delete + no evidence — warn (exit 0)" "0" "$(run_in_fixture "$TMP/predel-warn" pre-delete-grep-gate)"
+
+  # P3. fixture with staged delete + "Rule J" evidence — exit 0 (silent pass)
+  mkdir -p "$TMP/predel-evidence"
+  ( cd "$TMP/predel-evidence" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt b.txt && git add a.txt b.txt && git commit -q -m "init" \
+      && git rm -q a.txt && printf 'deleting a\n\nRule J: greppped src/ — zero callers\n' > .git/COMMIT_EDITMSG )
+  assert_exit "delete + Rule J evidence — exit 0" "0" "$(run_in_fixture "$TMP/predel-evidence" pre-delete-grep-gate)"
+
+  # P4. RELLO_SKIP_PREDELETE_GREP=1 short-circuits even on uninstalled git — exit 0
+  assert_exit "RELLO_SKIP_PREDELETE_GREP=1 — exit 0" "0" \
+    "$(cd "$TMP" && RELLO_SKIP_PREDELETE_GREP=1 "$CLI" pre-delete-grep-gate >/dev/null 2>&1; echo $?)"
+
+  # P5. CI=true short-circuits — exit 0
+  assert_exit "CI=true — exit 0" "0" \
+    "$(cd "$TMP" && CI=true "$CLI" pre-delete-grep-gate >/dev/null 2>&1; echo $?)"
+
+  printf '\nschema-change-reminder (v0.3.0)\n'
+
+  # S1. fixture with no schema staged — exit 0
+  mkdir -p "$TMP/schema-clean"
+  ( cd "$TMP/schema-clean" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt && git add a.txt && git commit -q -m "init" )
+  assert_exit "no schema — exit 0" "0" "$(run_in_fixture "$TMP/schema-clean" schema-change-reminder)"
+
+  # S2. fixture with prisma/schema.prisma staged + no verification — exit 0 (advisory)
+  mkdir -p "$TMP/schema-warn/prisma"
+  ( cd "$TMP/schema-warn" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt && git add a.txt && git commit -q -m "init" \
+      && printf 'generator client { provider = "prisma-client-js" }\n' > prisma/schema.prisma \
+      && git add prisma/schema.prisma && printf 'schema change\n' > .git/COMMIT_EDITMSG )
+  assert_exit "schema staged + no verification — advisory (exit 0)" "0" "$(run_in_fixture "$TMP/schema-warn" schema-change-reminder)"
+
+  # S3. fixture with prisma/schema.prisma staged + verification phrases — exit 0 (silent)
+  mkdir -p "$TMP/schema-verified/prisma"
+  ( cd "$TMP/schema-verified" && git init -q && git config user.email t@t && git config user.name t \
+      && touch a.txt && git add a.txt && git commit -q -m "init" \
+      && printf 'generator client { provider = "prisma-client-js" }\n' > prisma/schema.prisma \
+      && git add prisma/schema.prisma \
+      && printf 'schema change\n\nprisma migrate diff: No difference detected\n' > .git/COMMIT_EDITMSG )
+  assert_exit "schema staged + verified — exit 0 silent" "0" "$(run_in_fixture "$TMP/schema-verified" schema-change-reminder)"
+
+  # S4. RELLO_SKIP_SCHEMA_REMINDER=1 short-circuits — exit 0
+  assert_exit "RELLO_SKIP_SCHEMA_REMINDER=1 — exit 0" "0" \
+    "$(cd "$TMP" && RELLO_SKIP_SCHEMA_REMINDER=1 "$CLI" schema-change-reminder >/dev/null 2>&1; echo $?)"
+
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     exit 1
