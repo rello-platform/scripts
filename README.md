@@ -92,20 +92,35 @@ npx rello-scripts schema-change-reminder
 
 ### `floating-refs`
 
+As of **v0.3.1** the gate parses `dependencies`, `devDependencies`,
+`optionalDependencies`, and `peerDependencies` structurally (via Node) and
+validates every `@rello-platform/*` value — not just `github:`-prefixed ones.
+The pre-v0.3.1 prefix-only grep silently ignored `git+https://`, npm-caret, and
+wildcard shapes.
+
 Accepts:
 - `github:rello-platform/<pkg>#v<X.Y.Z>[<-prerelease>]` (semver tag)
 - `github:rello-platform/<pkg>#<40-char-hex-sha>` (full commit SHA)
+- `"*"` / `"workspace:*"` / `"workspace:^"` — **only** when a local npm-workspace
+  member package with that exact `name` exists (workspaces globs in the same
+  `package.json`, expanded and read). A wildcard/workspace value with **no**
+  matching member is a violation. See `DISCOVERED-PINCONV-ASSET-WHITELIST-IS-
+  WORKSPACE-PKG-NOT-VIOLATION-260524` (Rello's `@rello-platform/asset-whitelist`).
 
 Rejects:
 - `github:rello-platform/<pkg>` (bare ref, no `#`)
 - `github:rello-platform/<pkg>#main` (branch ref)
 - `github:rello-platform/<pkg>#<branch-name>` (any non-tag-non-sha ref)
 - `github:rello-platform/<pkg>#<short-sha>` (under 40 hex chars)
+- `git+https://github.com/rello-platform/<pkg>.git#...` / `git+ssh://` / `https://`
+- `^X.Y.Z` / `~X.Y.Z` / `X.Y.Z` (npm range / exact registry semver)
+- `npm:@scope/x@1` (npm alias) / `file:../x` / `link:../x`
+- `"*"` / `"workspace:*"` with no matching local workspace member
 
 Exit codes:
 - `0` — all refs pinned correctly
 - `1` — one or more refs floating / non-canonical
-- `2` — `package.json` not found
+- `2` — `package.json` not found, malformed, or unparseable
 
 ### `roles`
 

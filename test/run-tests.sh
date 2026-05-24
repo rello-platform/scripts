@@ -145,6 +145,100 @@ JSON
   mkdir -p "$TMP/fr-missing"
   assert_exit "missing package.json" "2" "$(run_in_fixture "$TMP/fr-missing" floating-refs)"
 
+  printf '\nfloating-refs (v0.3.1 structural shapes)\n'
+
+  # v0.3.1 catches every non-canonical pin shape — not just github:-prefixed.
+  # Helper: write a one-dep fixture, assert exit code.
+  fr_fixture() {
+    local name="$1" dep="$2" val="$3"
+    mkdir -p "$TMP/$name"
+    cat > "$TMP/$name/package.json" <<JSON
+{
+  "name": "fixture",
+  "dependencies": {
+    "$dep": "$val"
+  }
+}
+JSON
+  }
+
+  # --- exit 1 shapes ---
+  fr_fixture v31-githttps "@rello-platform/scripts" "git+https://github.com/rello-platform/scripts.git#10bcaed51f319cbc0071e81ffabc7df998558af1"
+  assert_exit "git+https://" "1" "$(run_in_fixture "$TMP/v31-githttps" floating-refs)"
+
+  fr_fixture v31-caret "@rello-platform/billing-client" "^0.1.0"
+  assert_exit "npm-caret ^0.1.0" "1" "$(run_in_fixture "$TMP/v31-caret" floating-refs)"
+
+  fr_fixture v31-tilde "@rello-platform/billing-client" "~0.1.0"
+  assert_exit "npm-tilde ~0.1.0" "1" "$(run_in_fixture "$TMP/v31-tilde" floating-refs)"
+
+  fr_fixture v31-wild-nomember "@rello-platform/asset-whitelist" "*"
+  assert_exit "wildcard * (no workspace member)" "1" "$(run_in_fixture "$TMP/v31-wild-nomember" floating-refs)"
+
+  fr_fixture v31-bare "@rello-platform/foo" "github:rello-platform/foo"
+  assert_exit "bare github:rello-platform/foo" "1" "$(run_in_fixture "$TMP/v31-bare" floating-refs)"
+
+  fr_fixture v31-branch "@rello-platform/foo" "github:rello-platform/foo#main"
+  assert_exit "branch ref #main" "1" "$(run_in_fixture "$TMP/v31-branch" floating-refs)"
+
+  fr_fixture v31-shortsha "@rello-platform/foo" "github:rello-platform/foo#0123abc"
+  assert_exit "short sha" "1" "$(run_in_fixture "$TMP/v31-shortsha" floating-refs)"
+
+  fr_fixture v31-file "@rello-platform/foo" "file:../x"
+  assert_exit "file:../x" "1" "$(run_in_fixture "$TMP/v31-file" floating-refs)"
+
+  fr_fixture v31-link "@rello-platform/foo" "link:../x"
+  assert_exit "link:../x" "1" "$(run_in_fixture "$TMP/v31-link" floating-refs)"
+
+  fr_fixture v31-npmalias "@rello-platform/foo" "npm:@scope/x@1"
+  assert_exit "npm:@scope/x@1" "1" "$(run_in_fixture "$TMP/v31-npmalias" floating-refs)"
+
+  # --- exit 0 shapes ---
+  fr_fixture v31-tag "@rello-platform/permissions" "github:rello-platform/permissions#v1.2.3"
+  assert_exit "valid #v1.2.3 tag" "0" "$(run_in_fixture "$TMP/v31-tag" floating-refs)"
+
+  fr_fixture v31-prerelease "@rello-platform/permissions" "github:rello-platform/permissions#v1.2.3-rc.1"
+  assert_exit "valid #v1.2.3-rc.1 prerelease" "0" "$(run_in_fixture "$TMP/v31-prerelease" floating-refs)"
+
+  fr_fixture v31-sha "@rello-platform/permissions" "github:rello-platform/permissions#0123456789abcdef0123456789abcdef01234567"
+  assert_exit "valid 40-hex SHA" "0" "$(run_in_fixture "$TMP/v31-sha" floating-refs)"
+
+  # --- workspace carve-out: * WITH a matching packages/* member — exit 0 ---
+  mkdir -p "$TMP/v31-workspace/packages/asset-whitelist"
+  cat > "$TMP/v31-workspace/package.json" <<'JSON'
+{
+  "name": "fixture",
+  "workspaces": ["packages/*"],
+  "dependencies": {
+    "@rello-platform/asset-whitelist": "*"
+  }
+}
+JSON
+  cat > "$TMP/v31-workspace/packages/asset-whitelist/package.json" <<'JSON'
+{
+  "name": "@rello-platform/asset-whitelist",
+  "version": "1.0.0"
+}
+JSON
+  assert_exit "wildcard * WITH workspace member" "0" "$(run_in_fixture "$TMP/v31-workspace" floating-refs)"
+
+  # --- per-violation message names the offending key + canonical replacement ---
+  local v31_msg
+  v31_msg="$(run_in_fixture_capture "$TMP/v31-githttps" floating-refs || true)"
+  if printf '%s' "$v31_msg" | grep -q "@rello-platform/scripts" \
+     && printf '%s' "$v31_msg" | grep -q "github:rello-platform/scripts#v<X.Y.Z>"; then
+    printf '  PASS  violation message names key + canonical replacement\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  violation message missing key/canonical hint; got: %s\n' "$v31_msg"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # --- malformed package.json — exit 2 ---
+  mkdir -p "$TMP/v31-malformed"
+  printf '{ this is not valid json' > "$TMP/v31-malformed/package.json"
+  assert_exit "malformed package.json" "2" "$(run_in_fixture "$TMP/v31-malformed" floating-refs)"
+
   printf '\nroles\n'
 
   # 7. clean src/ — exit 0
