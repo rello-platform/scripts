@@ -184,3 +184,14 @@ New cross-consumer canonicalized scripts ship as new subcommands inside this pac
 3. Add a behavior-parity smoke test under `test/`.
 4. Tag a new minor/patch version.
 5. Coordinate consumer pin-bumps in a sequenced rollout (no parallel cutovers per PA-ANOMALY-009 lock).
+
+## Local verification (pre-push hook)
+
+CI (`ci.yml`) was retired 2026-05-24 (GH-Actions retirement workstream). Verification
+now runs locally via the committed `.husky/pre-push` hook (`npm test` — the behavior
+harness + floating-refs dogfood the workflow ran). The hook is not auto-installed
+(no lifecycle script, matching the existing `.husky/pre-commit`). Enable once per clone:
+
+```sh
+git config core.hooksPath .husky
+```

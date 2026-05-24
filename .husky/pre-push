@@ -1,0 +1,7 @@
+#!/usr/bin/env sh
+# Pre-push verification — replaces the retired ci.yml (GH-Actions retirement;
+# Kelly 2026-05-18 + 2026-05-24). Bash CLI package — no tsc/build, just the
+# behavior-parity harness + floating-refs dogfood (mirrors the old ci.yml jobs).
+# No-prepare install (git-dep-safe, matches existing .husky/pre-commit precedent).
+# Enable once per clone:  git config core.hooksPath .husky
+npm test
