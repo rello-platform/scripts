@@ -7,6 +7,7 @@ Canonical CLI for cross-consumer Rello platform scripts (gates + operational too
 - `db-apply-sql` — operational tooling that applies `prisma/sql/*.sql` files via `prisma db execute` (formerly `scripts/db-apply-sql.sh`).
 - `pre-delete-grep-gate` — pre-commit gate enforcing PLATFORM-CLASS-LEVEL-RULES.md Rule J: deletion-bearing commits cite pre-flight grep evidence in the message body. Ships at warn (v0.3.0); promotion to error gated on Kelly authorization OR 14-day soak.
 - `schema-change-reminder` — pre-commit advisory: when `prisma/schema.prisma` is staged, prompts the author to confirm `prisma migrate diff --exit-code` was run and verification lines are pasted in the commit body. Always advisory (never blocks).
+- `check-stale-pins` — pre-push gate (v0.4.0) that rejects `@rello-platform/*` pins ≥2 minors behind their canonical-latest **git tag**. Fail-open when offline. See PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4.
 
 ## Provenance
 
@@ -45,6 +46,9 @@ npx rello-scripts roles --root src/jobs               # non-standard layout (e.g
 
 npx rello-scripts db-apply-sql                        # defaults: ./prisma/schema.prisma + ./prisma/sql
 npx rello-scripts db-apply-sql ./schema.prisma ./sql
+
+npx rello-scripts check-stale-pins                    # defaults to scanning ./package.json (v0.4.0)
+npx rello-scripts check-stale-pins --root path/to/dir # scans <dir>/package.json
 ```
 
 ### `--root <path>` (v0.2.0)
@@ -67,6 +71,20 @@ npx rello-scripts roles   # only if the consumer adopts the roles gate
 # v0.3.0 — Rule J + schema-change discipline:
 npx rello-scripts pre-delete-grep-gate
 npx rello-scripts schema-change-reminder
+```
+
+### Wire into husky pre-push (v0.4.0 staleness gate)
+
+`check-stale-pins` is a **pre-push** gate (not pre-commit) — it makes a network
+call per `@rello-platform/*` dep, so it belongs on push, not on every commit.
+Add it alongside the existing tsc/build/test steps. Because the script is
+**fail-open** (exit 0 on WARN / offline / rate-limit; exit 1 only on a real
+FAIL), a bare invocation under `set -e` blocks a push ONLY when a pin is ≥2
+minors behind with network available — exactly the intended behavior:
+
+```sh
+# .husky/pre-push   (after tsc / build / test)
+npx rello-scripts check-stale-pins
 ```
 
 ### Wire into package.json scripts
@@ -170,6 +188,75 @@ Pre-commit advisory. When `prisma/schema.prisma` is staged, the script grep-chec
 If absent, prints a one-screen reminder. **Always advisory — never blocks.** Schema-change discipline is a 7-step ritual; one CLI hook can't verify all 7 — it can only prompt.
 
 Suppress: `RELLO_SKIP_SCHEMA_REMINDER=1`. Skipped in CI.
+
+### `check-stale-pins` (v0.4.0)
+
+Version-staleness gate. For every `@rello-platform/*` dep in the consumer's
+`package.json`, it determines canonical-latest from the dep repo's newest git
+**tag** (`gh api repos/rello-platform/<repo>/tags`, `sort -V`) — **not**
+`gh release list`, because releases lag tags (e.g. `permissions` latest release
+`v0.35.0` vs latest tag `v0.41.0`). The repo name is read from the **pin value**
+(`github:rello-platform/<repo>#…`), not the package key — so `@rello-platform/ui`
+correctly resolves to repo `rello-ui`.
+
+Classification (per spec §4 + Build-KA Phase 4 lock):
+
+| Class | Condition | Effect |
+|---|---|---|
+| `OK`   | current, or ahead of latest tag | — |
+| `WARN` | exactly 1 minor behind | surfaced, does **not** block |
+| `FAIL` | ≥2 minors behind, **or** a full major behind | exit 1, blocks push |
+
+Prerelease tags (`v1.2.3-rc.1`) are ignored for staleness counting.
+
+**SHA-pinned deps** carry no semver, so the gate resolves them with
+`gh api repos/rello-platform/<repo>/compare/<base>...<sha>` (≤3 calls):
+ahead/identical to latest tag → `OK`; diverged → `WARN`; behind latest but at/
+ahead of the second-newest minor tag → `WARN` (1 behind); behind that too →
+`FAIL` (≥2 behind).
+
+**Skips:** workspace/wildcard refs (`"*"`, `"workspace:*"`) and non-canonical
+forms (caret/registry/`git+https` with no resolvable repo) — pin *form* is the
+`floating-refs` gate's job, so those are reported `WARN`/`SKIP`, never `FAIL`.
+
+**Fail-open offline:** if `gh`/network is unreachable or rate-limited, the dep
+is reported `UNKNOWN` (WARN-class) and never `FAIL`s — a pre-push hook must not
+block an offline developer. The gate uses `GH_TOKEN`/`GITHUB_TOKEN` (read
+automatically by `gh`) for an authenticated rate budget when present.
+
+#### Intentional-hold exceptions (allowlist)
+
+A pin that is *intentionally* held behind canonical-latest (e.g. a CJS-boundary
+hold, or a SHA pinned ahead of the latest tag) must be allowlisted so it
+classifies `OK` instead of `FAIL`. **Note:** a `// stale-pin-ok` comment inside
+`package.json` is **not** supported — `package.json` is strict JSON and a comment
+breaks `npm install`. Two JSON-legal mechanisms exist instead:
+
+1. **Sidecar file** `scripts/stale-pin-exceptions.json` (recommended):
+
+   ```json
+   {
+     "@rello-platform/api-client": "CJS-held at v1.9.0; api-client v2.6.0+ is ESM-only. See DISCOVERED-PINCONV-PHASE2-INTENTIONAL-PIN-EXCEPTIONS-260524."
+   }
+   ```
+   (Also accepts `{ "exceptions": { … } }` or `{ "exceptions": [ {"package": "…", "reason": "…"} ] }`.)
+
+2. **Inline field** `relloStalePinExceptions` inside `package.json` — the
+   JSON-legal "annotation next to the dep":
+
+   ```json
+   { "relloStalePinExceptions": { "@rello-platform/api-client": "<reason>" } }
+   ```
+
+A dep present in either is reported `OK (allowlisted: <reason>)` and never
+`FAIL`s. The sidecar wins on conflict. Always record a real reason — the
+allowlist is for *documented intentional* holds, never to silence a genuine
+staleness finding (bump the pin instead).
+
+Exit codes:
+- `0` — all deps OK/WARN/SKIP/UNKNOWN/allowlisted (offline always lands here)
+- `1` — one or more deps are `FAIL` (≥2 minors / a major behind) and not allowlisted
+- `2` — `package.json` not found or unparseable, or `--root` path invalid
 
 ## Versioning
 

@@ -426,6 +426,112 @@ PRISMA
   assert_exit "RELLO_SKIP_SCHEMA_REMINDER=1 — exit 0" "0" \
     "$(cd "$TMP" && RELLO_SKIP_SCHEMA_REMINDER=1 "$CLI" schema-change-reminder >/dev/null 2>&1; echo $?)"
 
+  printf '\ncheck-stale-pins (v0.4.0)\n'
+
+  # Shared mock GitHub state — no network. Tags are sorted -V internally; the
+  # gate reads <repo>.tags (newline tag list) and <repo>.compare.<base>...<head>.
+  local MOCK="$TMP/csp-mock"
+  mkdir -p "$MOCK"
+  printf 'v0.38.0\nv0.39.0\nv0.40.0\nv0.41.0\n' > "$MOCK/permissions.tags"
+  printf 'v2.14.0\nv2.16.0\nv2.18.0\n'           > "$MOCK/api-client.tags"
+  printf 'v2.14.0\nv2.16.0\nv2.18.0\n'           > "$MOCK/rello-ui.tags"
+
+  # csp helper: write a one-dep package.json fixture.
+  csp_fixture() {
+    local name="$1" dep="$2" val="$3"
+    mkdir -p "$TMP/$name"
+    cat > "$TMP/$name/package.json" <<JSON
+{ "name": "fixture", "dependencies": { "$dep": "$val" } }
+JSON
+  }
+  # csp run: invoke under the mock dir.
+  csp_run() {
+    local fixture="$1"; shift
+    ( cd "$fixture" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins "$@" >/dev/null 2>&1; echo $? )
+  }
+
+  # C1. current tag — exit 0
+  csp_fixture csp-ok "@rello-platform/permissions" "github:rello-platform/permissions#v0.41.0"
+  assert_exit "OK: current tag (v0.41.0)" "0" "$(csp_run "$TMP/csp-ok")"
+
+  # C2. 1 minor behind — WARN, exit 0
+  csp_fixture csp-warn "@rello-platform/permissions" "github:rello-platform/permissions#v0.40.0"
+  assert_exit "WARN: 1 minor behind (v0.40.0) — exit 0" "0" "$(csp_run "$TMP/csp-warn")"
+
+  # C3. >=2 minors behind — FAIL, exit 1
+  csp_fixture csp-fail "@rello-platform/permissions" "github:rello-platform/permissions#v0.38.0"
+  assert_exit "FAIL: 3 minors behind (v0.38.0) — exit 1" "1" "$(csp_run "$TMP/csp-fail")"
+
+  # C4. full major behind — FAIL, exit 1
+  csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
+  assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"
+
+  # C5. allowlisted via sidecar scripts/stale-pin-exceptions.json — exit 0
+  mkdir -p "$TMP/csp-allow-side/scripts"
+  cat > "$TMP/csp-allow-side/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/api-client": "github:rello-platform/api-client#v1.9.0" } }
+JSON
+  cat > "$TMP/csp-allow-side/scripts/stale-pin-exceptions.json" <<'JSON'
+{ "@rello-platform/api-client": "CJS-held v1.9.0 (EX-3)" }
+JSON
+  assert_exit "allowlisted (sidecar) suppresses FAIL — exit 0" "0" "$(csp_run "$TMP/csp-allow-side")"
+
+  # C6. allowlisted via inline relloStalePinExceptions field — exit 0
+  mkdir -p "$TMP/csp-allow-inline"
+  cat > "$TMP/csp-allow-inline/package.json" <<'JSON'
+{ "name": "fixture",
+  "relloStalePinExceptions": { "@rello-platform/api-client": "CJS-held v1.9.0 (EX-3)" },
+  "dependencies": { "@rello-platform/api-client": "github:rello-platform/api-client#v1.9.0" } }
+JSON
+  assert_exit "allowlisted (inline field) suppresses FAIL — exit 0" "0" "$(csp_run "$TMP/csp-allow-inline")"
+
+  # C7. offline / unreachable gh — fail-open, exit 0 (even on a would-be-FAIL)
+  assert_exit "offline fail-open on would-be-FAIL — exit 0" "0" \
+    "$(cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_SIMULATE_OFFLINE=1 "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
+
+  # C8. workspace wildcard skipped; @rello-platform/ui maps to repo rello-ui — exit 0
+  mkdir -p "$TMP/csp-mixed"
+  cat > "$TMP/csp-mixed/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": {
+    "@rello-platform/asset-whitelist": "*",
+    "@rello-platform/ui": "github:rello-platform/rello-ui#v2.18.0" } }
+JSON
+  assert_exit "workspace skip + ui->rello-ui repo map — exit 0" "0" "$(csp_run "$TMP/csp-mixed")"
+
+  # C9. SHA ahead of latest tag — OK, exit 0
+  local SHA1="1111111111111111111111111111111111111111"
+  csp_fixture csp-sha-ahead "@rello-platform/api-client" "github:rello-platform/api-client#$SHA1"
+  printf 'ahead' > "$MOCK/api-client.compare.v2.18.0...$SHA1"
+  assert_exit "SHA ahead of latest tag — exit 0" "0" "$(csp_run "$TMP/csp-sha-ahead")"
+
+  # C10. SHA >=2 minors behind — FAIL, exit 1
+  local SHA2="2222222222222222222222222222222222222222"
+  csp_fixture csp-sha-fail "@rello-platform/api-client" "github:rello-platform/api-client#$SHA2"
+  printf 'behind' > "$MOCK/api-client.compare.v2.18.0...$SHA2"
+  printf 'behind' > "$MOCK/api-client.compare.v2.16.0...$SHA2"
+  assert_exit "SHA >=2 minors behind — exit 1" "1" "$(csp_run "$TMP/csp-sha-fail")"
+
+  # C11. SHA exactly 1 minor behind (>= second-newest minor) — WARN, exit 0
+  local SHA3="3333333333333333333333333333333333333333"
+  csp_fixture csp-sha-warn "@rello-platform/api-client" "github:rello-platform/api-client#$SHA3"
+  printf 'behind' > "$MOCK/api-client.compare.v2.18.0...$SHA3"
+  printf 'ahead'  > "$MOCK/api-client.compare.v2.16.0...$SHA3"
+  assert_exit "SHA 1 minor behind — WARN, exit 0" "0" "$(csp_run "$TMP/csp-sha-warn")"
+
+  # C12. no @rello-platform deps — exit 0
+  mkdir -p "$TMP/csp-none"
+  cat > "$TMP/csp-none/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "left-pad": "^1.0.0" } }
+JSON
+  assert_exit "no @rello-platform deps — exit 0" "0" "$(csp_run "$TMP/csp-none")"
+
+  # C13. --root <subdir> resolution — exit 0
+  mkdir -p "$TMP/csp-root/sub"
+  cat > "$TMP/csp-root/sub/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/permissions": "github:rello-platform/permissions#v0.41.0" } }
+JSON
+  assert_exit "--root <subdir> — exit 0" "0" "$(csp_run "$TMP/csp-root" --root sub)"
+
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     exit 1

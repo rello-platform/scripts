@@ -16,6 +16,8 @@
 // v0.2.0 — adds --root <path> flag for floating-refs + roles subcommands.
 // v0.3.0 — adds pre-delete-grep-gate + schema-change-reminder pre-commit hooks
 //          per SPEC-PLATFORM-LINT-RULES-AND-HOOKS Phase 1 PR-C.
+// v0.4.0 — adds check-stale-pins (version-staleness gate, tags-not-releases)
+//          per PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4 (FIX-11).
 // Backward-compatible: defaults preserve v0.1.0 + v0.2.0 behavior on every input.
 
 "use strict";
@@ -30,11 +32,12 @@ const SUBCOMMANDS = {
   "db-apply-sql": "db-apply-sql.sh",
   "pre-delete-grep-gate": "pre-delete-grep-gate.sh",
   "schema-change-reminder": "schema-change-reminder.sh",
+  "check-stale-pins": "check-stale-pins.sh",
 };
 
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
-const ROOT_AWARE = new Set(["floating-refs", "roles"]);
+const ROOT_AWARE = new Set(["floating-refs", "roles", "check-stale-pins"]);
 
 const args = process.argv.slice(2);
 const subcommand = args[0];
@@ -49,10 +52,12 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  db-apply-sql [schema] [sql-dir]               Apply prisma/sql/*.sql via prisma db execute\n" +
     "  pre-delete-grep-gate                          Pre-commit: cite Rule J grep evidence on deletes (warn)\n" +
     "  schema-change-reminder                        Pre-commit: remind to verify when prisma/schema.prisma staged\n" +
+    "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
     "\n" +
     "Flags:\n" +
     "  --root <path>   floating-refs: directory containing package.json (default: .)\n" +
-    "                  roles: directory to scan for source files (default: src)\n"
+    "                  roles: directory to scan for source files (default: src)\n" +
+    "                  check-stale-pins: directory containing package.json (default: .)\n"
   );
   process.exit(subcommand ? 0 : 2);
 }
