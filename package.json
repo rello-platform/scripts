@@ -1,7 +1,7 @@
 {
   "name": "@rello-platform/scripts",
-  "version": "0.4.0",
-  "description": "Canonical CLI for cross-consumer Rello platform scripts (gates + operational tooling). Single source of truth for check-floating-refs, check-hardcoded-roles, db-apply-sql, pre-delete-grep-gate, schema-change-reminder, and check-stale-pins.",
+  "version": "0.5.0",
+  "description": "Canonical CLI for cross-consumer Rello platform scripts (gates + operational tooling). Single source of truth for check-floating-refs, check-hardcoded-roles, db-apply-sql, pre-delete-grep-gate, schema-change-reminder, check-stale-pins, and check-lockfile-ssh.",
   "bin": {
     "rello-scripts": "bin/rello-scripts"
   },

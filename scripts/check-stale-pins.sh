@@ -58,6 +58,12 @@
 #   RELLO_STALE_PINS_SIMULATE_OFFLINE=1  force the gh wrapper to fail (offline path)
 #
 # v0.4.0 — new subcommand.
+# v0.5.0 — also runs the sibling check-lockfile-ssh gate against the adjacent
+#          package-lock.json (when present), so every repo wiring
+#          check-stale-pins inherits the ssh-lockfile guard with a pin bump
+#          and zero hook edits. That gate is local-only (no network) and is
+#          NOT fail-open. See DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-
+#          RAILWAY-CACHE-LUCK-260610 (AMENDED).
 # Spec: PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC.md Phase 4.
 
 set -uo pipefail
@@ -417,25 +423,67 @@ while IFS=$'\t' read -r tag key val; do
 done <<< "$parsed"
 
 # ---------------------------------------------------------------------------
-# 5. Print report + exit.
+# 5. Sibling gate: lockfile git+ssh resolved entries (v0.5.0).
+#    Riding here means every repo already running check-stale-pins inherits
+#    the ssh-lockfile guard with a pin bump and ZERO hook edits. Runs even
+#    when there are no @rello-platform/* deps (any git dep can carry a
+#    git+ssh resolved entry), and is NOT subject to the fail-open-offline
+#    carve-out — it is local-only (no network).
+#    Spec: DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-
+#    260610 (AMENDED §3: the guard must live in the hook chain because
+#    `npm install` re-stamps git+ssh).
+# ---------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOCKFILE="$PKG_DIR/package-lock.json"
+PIN_FAIL="$HAS_FAIL"
+LOCK_SSH_FAIL=0
+LOCK_SSH_OUTPUT=""
+if [ -f "$LOCKFILE" ]; then
+  set +e
+  LOCK_SSH_OUTPUT="$(bash "$SCRIPT_DIR/check-lockfile-ssh.sh" "$LOCKFILE" 2>&1)"
+  lock_status=$?
+  set -e
+  if [ "$lock_status" -ne 0 ]; then
+    # exit 1 (offenders) and exit 2 (unparseable lockfile) both block — a
+    # lockfile npm can't parse can't deploy either.
+    LOCK_SSH_FAIL=1
+    HAS_FAIL=1
+  fi
+fi
+
+# ---------------------------------------------------------------------------
+# 6. Print report + exit.
 # ---------------------------------------------------------------------------
 if [ "${#REPORT[@]}" -eq 0 ]; then
   printf 'OK: no @rello-platform/* deps in %s.\n' "$PKG"
-  exit 0
+else
+  printf 'check-stale-pins — %s\n' "$PKG"
+  for line in "${REPORT[@]}"; do
+    printf '  %s\n' "$line"
+  done
 fi
 
-printf 'check-stale-pins — %s\n' "$PKG"
-for line in "${REPORT[@]}"; do
-  printf '  %s\n' "$line"
-done
+if [ -n "$LOCK_SSH_OUTPUT" ]; then
+  if [ "$LOCK_SSH_FAIL" -eq 1 ]; then
+    printf '\n%s\n' "$LOCK_SSH_OUTPUT" >&2
+  else
+    printf '  %s\n' "$LOCK_SSH_OUTPUT"
+  fi
+fi
 
 if [ "$HAS_FAIL" -eq 1 ]; then
-  printf '\nFAIL: one or more @rello-platform/* pins are >= 2 minors behind canonical-latest.\n' >&2
-  printf 'Bump the FAIL deps to the latest tag (github:rello-platform/<repo>#v<X.Y.Z>),\n' >&2
-  printf 'or add an intentional-hold exception (scripts/stale-pin-exceptions.json or the\n' >&2
-  printf 'relloStalePinExceptions field in package.json) with a documented reason.\n' >&2
+  if [ "$PIN_FAIL" -eq 1 ]; then
+    printf '\nFAIL: one or more @rello-platform/* pins are >= 2 minors behind canonical-latest.\n' >&2
+    printf 'Bump the FAIL deps to the latest tag (github:rello-platform/<repo>#v<X.Y.Z>),\n' >&2
+    printf 'or add an intentional-hold exception (scripts/stale-pin-exceptions.json or the\n' >&2
+    printf 'relloStalePinExceptions field in package.json) with a documented reason.\n' >&2
+  fi
+  if [ "$LOCK_SSH_FAIL" -eq 1 ]; then
+    printf '\nFAIL: package-lock.json carries git+ssh resolved entries (Railway-unfetchable).\n' >&2
+    printf 'Run `npx rello-scripts check-lockfile-ssh --fix` and commit the lockfile.\n' >&2
+  fi
   exit 1
 fi
 
-printf '\nOK: all @rello-platform/* pins within 1 minor of canonical-latest (WARN/UNKNOWN do not block).\n'
+printf '\nOK: all @rello-platform/* pins within 1 minor of canonical-latest (WARN/UNKNOWN do not block); no git+ssh lockfile entries.\n'
 exit 0

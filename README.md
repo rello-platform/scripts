@@ -7,7 +7,8 @@ Canonical CLI for cross-consumer Rello platform scripts (gates + operational too
 - `db-apply-sql` — operational tooling that applies `prisma/sql/*.sql` files via `prisma db execute` (formerly `scripts/db-apply-sql.sh`).
 - `pre-delete-grep-gate` — pre-commit gate enforcing PLATFORM-CLASS-LEVEL-RULES.md Rule J: deletion-bearing commits cite pre-flight grep evidence in the message body. Ships at warn (v0.3.0); promotion to error gated on Kelly authorization OR 14-day soak.
 - `schema-change-reminder` — pre-commit advisory: when `prisma/schema.prisma` is staged, prompts the author to confirm `prisma migrate diff --exit-code` was run and verification lines are pasted in the commit body. Always advisory (never blocks).
-- `check-stale-pins` — pre-push gate (v0.4.0) that rejects `@rello-platform/*` pins ≥2 minors behind their canonical-latest **git tag**. Fail-open when offline. See PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4.
+- `check-stale-pins` — pre-push gate (v0.4.0) that rejects `@rello-platform/*` pins ≥2 minors behind their canonical-latest **git tag**. Fail-open when offline. See PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4. Since v0.5.0 it also runs the `check-lockfile-ssh` gate against the adjacent `package-lock.json`.
+- `check-lockfile-ssh` — gate (v0.5.0) that rejects `"resolved": "git+ssh://…"` entries in `package-lock.json` (Railway build containers have no ssh key — any cache miss fails `npm ci` with `Permission denied (publickey)`). `--fix` rewrites github.com entries in place to `git+https://github.com/<org>/<repo>.git#<sha>`, sha preserved. See DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610 (AMENDED).
 
 ## Provenance
 
@@ -26,7 +27,7 @@ Pin via `github:` in the consumer's `package.json` (matches the platform's `@rel
 ```json
 {
   "devDependencies": {
-    "@rello-platform/scripts": "github:rello-platform/scripts#v0.3.0"
+    "@rello-platform/scripts": "github:rello-platform/scripts#v0.5.0"
   }
 }
 ```
@@ -49,6 +50,10 @@ npx rello-scripts db-apply-sql ./schema.prisma ./sql
 
 npx rello-scripts check-stale-pins                    # defaults to scanning ./package.json (v0.4.0)
 npx rello-scripts check-stale-pins --root path/to/dir # scans <dir>/package.json
+
+npx rello-scripts check-lockfile-ssh                  # defaults to scanning ./package-lock.json (v0.5.0)
+npx rello-scripts check-lockfile-ssh --fix            # rewrite git+ssh github entries to git+https in place
+npx rello-scripts check-lockfile-ssh --root path/to/dir [--fix]   # scans <dir>/package-lock.json
 ```
 
 ### `--root <path>` (v0.2.0)
@@ -86,6 +91,13 @@ minors behind with network available — exactly the intended behavior:
 # .husky/pre-push   (after tsc / build / test)
 npx rello-scripts check-stale-pins
 ```
+
+Since v0.5.0 this invocation ALSO runs the `check-lockfile-ssh` gate against the
+`package-lock.json` next to the scanned `package.json` (when one exists) — so a
+repo that already wires `check-stale-pins` inherits the ssh-lockfile guard with
+a pin bump and **zero hook edits**. Unlike the staleness check, the lockfile
+gate is local-only (no network) and is **not** fail-open: a `git+ssh://`
+resolved entry blocks the push even offline.
 
 ### Wire into package.json scripts
 
@@ -253,10 +265,63 @@ A dep present in either is reported `OK (allowlisted: <reason>)` and never
 allowlist is for *documented intentional* holds, never to silence a genuine
 staleness finding (bump the pin instead).
 
+**Embedded lockfile gate (v0.5.0):** after the per-dep walk, the gate runs
+`check-lockfile-ssh` against the `package-lock.json` adjacent to the scanned
+`package.json` (skipped when no lockfile exists). This runs even when there are
+no `@rello-platform/*` deps (any git dep can carry a `git+ssh` resolved entry)
+and is **not** covered by the fail-open-offline carve-out — it is local-only.
+A finding exits `1` with the `--fix` remediation named.
+
 Exit codes:
-- `0` — all deps OK/WARN/SKIP/UNKNOWN/allowlisted (offline always lands here)
-- `1` — one or more deps are `FAIL` (≥2 minors / a major behind) and not allowlisted
+- `0` — all deps OK/WARN/SKIP/UNKNOWN/allowlisted (offline always lands here) and (v0.5.0) no `git+ssh` lockfile entries
+- `1` — one or more deps are `FAIL` (≥2 minors / a major behind) and not allowlisted, **or** (v0.5.0) the adjacent `package-lock.json` carries `git+ssh://` resolved entries (or is unparseable)
 - `2` — `package.json` not found or unparseable, or `--root` path invalid
+
+### `check-lockfile-ssh` (v0.5.0)
+
+SSH-lockfile guard. The platform pin convention `github:rello-platform/<pkg>#vX.Y.Z`
+makes npm record `"resolved": "git+ssh://git@github.com/…"` in
+`package-lock.json`. Local installs mask it (a global ssh→https git rewrite),
+but **Railway build containers have no ssh key and no rewrite** — a live
+`git ls-remote ssh://git@github.com/…` during `npm ci` fails
+`Permission denied (publickey)` → exit 128 → deploy FAILED. Pre-existing ssh
+entries only build via npm build-cache luck; any cache eviction, fresh service,
+or net-new git dep fails deterministically (proven fatal 2026-06-10 by
+`vault-crypto` across Newsletter-Studio, the-drumbeat, Open-House-Hub).
+
+The durable fix is a hand-edit of the lockfile `resolved` field only — pacote
+fetches verbatim from `resolved`. A `git+https` spec in `package.json` is NOT
+viable: npm's hosted-git-info re-canonicalizes it back to the `github:`
+shortcut + ssh `resolved`, and the `floating-refs` gate rejects that spec form
+anyway. And because **`npm install` re-stamps `git+ssh`** on any install
+touching a git dep, the guard lives in the hook chain (this gate) so the loop
+is self-healing: install re-stamps → gate fails → `--fix` re-heals → commit.
+
+Behavior:
+
+- **Check mode** (default): FAIL (exit 1) if `package-lock.json` contains any
+  `"resolved": "git+ssh://…"` entry. The message names each offender (lockfile
+  package path + URL) and the `--fix` remediation.
+- **`--fix`**: rewrites github.com offenders in place to
+  `git+https://github.com/<org>/<repo>.git#<sha>` (sha/ref fragment preserved
+  verbatim) via exact-string replacement of each quoted `resolved` value —
+  npm's lockfile formatting is untouched, and the rewrite is parse-verified
+  before the file is written. Non-github `git+ssh` entries are NOT
+  auto-fixable and still exit 1 (named for manual review).
+- Walks both lockfile shapes: v2/v3 flat `packages` map and v1 nested
+  `dependencies` tree (recursive).
+- Local-only: no network, no fail-open carve-out.
+- Also invoked automatically by `check-stale-pins` (see above), so consumer
+  repos inherit this gate wherever that one already runs — pin bump only,
+  zero hook edits.
+
+Exit codes:
+- `0` — no `git+ssh` resolved entries (or `--fix` rewrote every offender)
+- `1` — `git+ssh` resolved entries present (check mode), or unfixable non-github entries remain after `--fix`
+- `2` — `package-lock.json` not found or unparseable, or `--root` path invalid
+
+Spec: DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610
+(AMENDED 2026-06-10 — "the durable guard must live in the hook chain").
 
 ## Versioning
 
