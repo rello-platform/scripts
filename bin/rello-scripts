@@ -8,6 +8,8 @@
 //   db-apply-sql            — operational: applies prisma/sql/*.sql files via prisma db execute
 //   pre-delete-grep-gate    — pre-commit gate: deletion commits cite Rule J grep evidence (warn)
 //   schema-change-reminder  — pre-commit advisory: prisma/schema.prisma staged → reminder to verify
+//   check-stale-pins        — pre-push gate: rejects @rello-platform/* pins >= 2 minors behind latest tag
+//   check-lockfile-ssh      — gate: rejects git+ssh resolved entries in package-lock.json (--fix rewrites)
 //
 // Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
 // criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
@@ -18,6 +20,9 @@
 //          per SPEC-PLATFORM-LINT-RULES-AND-HOOKS Phase 1 PR-C.
 // v0.4.0 — adds check-stale-pins (version-staleness gate, tags-not-releases)
 //          per PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4 (FIX-11).
+// v0.5.0 — adds check-lockfile-ssh (Railway-unfetchable git+ssh lockfile guard,
+//          also run by check-stale-pins so consumers inherit it pin-bump-only)
+//          per DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610.
 // Backward-compatible: defaults preserve v0.1.0 + v0.2.0 behavior on every input.
 
 "use strict";
@@ -33,11 +38,12 @@ const SUBCOMMANDS = {
   "pre-delete-grep-gate": "pre-delete-grep-gate.sh",
   "schema-change-reminder": "schema-change-reminder.sh",
   "check-stale-pins": "check-stale-pins.sh",
+  "check-lockfile-ssh": "check-lockfile-ssh.sh",
 };
 
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
-const ROOT_AWARE = new Set(["floating-refs", "roles", "check-stale-pins"]);
+const ROOT_AWARE = new Set(["floating-refs", "roles", "check-stale-pins", "check-lockfile-ssh"]);
 
 const args = process.argv.slice(2);
 const subcommand = args[0];
@@ -53,11 +59,15 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  pre-delete-grep-gate                          Pre-commit: cite Rule J grep evidence on deletes (warn)\n" +
     "  schema-change-reminder                        Pre-commit: remind to verify when prisma/schema.prisma staged\n" +
     "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
+    "  check-lockfile-ssh [--root <dir>] [--fix]     Gate: reject git+ssh resolved entries in package-lock.json\n" +
+    "                                                (--fix rewrites github.com entries to git+https, sha preserved)\n" +
     "\n" +
     "Flags:\n" +
     "  --root <path>   floating-refs: directory containing package.json (default: .)\n" +
     "                  roles: directory to scan for source files (default: src)\n" +
-    "                  check-stale-pins: directory containing package.json (default: .)\n"
+    "                  check-stale-pins: directory containing package.json (default: .)\n" +
+    "                  check-lockfile-ssh: directory containing package-lock.json (default: .)\n" +
+    "  --fix           check-lockfile-ssh: rewrite git+ssh github.com resolved entries in place\n"
   );
   process.exit(subcommand ? 0 : 2);
 }

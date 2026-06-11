@@ -39,6 +39,15 @@
 
 set -euo pipefail
 
+# Fixture isolation (v0.5.0): when this harness runs under a git hook (husky
+# pre-push), git exports GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE into the hook
+# environment. The pre-delete-grep-gate / schema-change-reminder fixtures
+# `git init` + commit inside $TMP — with those vars inherited, every fixture
+# git command silently operates on the OUTER repo instead (observed pushing
+# from a linked worktree: fixture commits landed on the real branch and real
+# files were staged for deletion). Unset them so fixture git is always local.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR
+
 PKG_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CLI="$PKG_ROOT/bin/rello-scripts"
 
@@ -531,6 +540,211 @@ JSON
 { "name": "fixture", "dependencies": { "@rello-platform/permissions": "github:rello-platform/permissions#v0.41.0" } }
 JSON
   assert_exit "--root <subdir> — exit 0" "0" "$(csp_run "$TMP/csp-root" --root sub)"
+
+  printf '\ncheck-lockfile-ssh (v0.5.0)\n'
+
+  # Shared fixture URLs. The sha fragment must survive --fix verbatim.
+  local CLS_SHA="0123456789abcdef0123456789abcdef01234567"
+  local CLS_SSH="git+ssh://git@github.com/rello-platform/vault-crypto.git#$CLS_SHA"
+  local CLS_HTTPS="git+https://github.com/rello-platform/vault-crypto.git#$CLS_SHA"
+
+  # cls helper: write a package-lock.json fixture (v3 `packages` shape).
+  cls_fixture() {
+    local name="$1" resolved="$2"
+    mkdir -p "$TMP/$name"
+    cat > "$TMP/$name/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "fixture" },
+    "node_modules/@rello-platform/vault-crypto": {
+      "resolved": "$resolved",
+      "integrity": "sha512-fake"
+    },
+    "node_modules/left-pad": {
+      "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz"
+    }
+  }
+}
+JSON
+  }
+
+  # L1. clean lockfile (git+https + registry) — exit 0
+  cls_fixture cls-clean "$CLS_HTTPS"
+  assert_exit "clean lockfile (git+https + registry) — exit 0" "0" "$(run_in_fixture "$TMP/cls-clean" check-lockfile-ssh)"
+
+  # L2. git+ssh entry (v3 packages shape) — exit 1
+  cls_fixture cls-ssh "$CLS_SSH"
+  assert_exit "git+ssh resolved entry — exit 1" "1" "$(run_in_fixture "$TMP/cls-ssh" check-lockfile-ssh)"
+
+  # L2a. failure message names the offender path + URL + --fix remediation
+  local cls_msg
+  cls_msg="$(run_in_fixture_capture "$TMP/cls-ssh" check-lockfile-ssh || true)"
+  if printf '%s' "$cls_msg" | grep -q "node_modules/@rello-platform/vault-crypto" \
+     && printf '%s' "$cls_msg" | grep -q "git+ssh://git@github.com/rello-platform/vault-crypto" \
+     && printf '%s' "$cls_msg" | grep -q "check-lockfile-ssh --fix"; then
+    printf '  PASS  failure message names offender + URL + --fix remediation\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  failure message missing offender/URL/remediation; got: %s\n' "$cls_msg"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # L3. --fix rewrites to git+https preserving the sha — exit 0
+  cls_fixture cls-fix "$CLS_SSH"
+  assert_exit "--fix rewrites github ssh entry — exit 0" "0" "$(run_in_fixture "$TMP/cls-fix" check-lockfile-ssh --fix)"
+  if grep -qF "\"resolved\": \"$CLS_HTTPS\"" "$TMP/cls-fix/package-lock.json" \
+     && ! grep -q "git+ssh://" "$TMP/cls-fix/package-lock.json"; then
+    printf '  PASS  --fix wrote git+https with sha preserved\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  --fix did not write expected git+https resolved value\n'
+    FAIL=$((FAIL + 1))
+  fi
+
+  # L3a. post-fix re-check is green (self-healing loop closes) — exit 0
+  assert_exit "post-fix re-check — exit 0" "0" "$(run_in_fixture "$TMP/cls-fix" check-lockfile-ssh)"
+
+  # L3b. lockfile still parses as JSON after --fix
+  if node -e 'JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"))' "$TMP/cls-fix/package-lock.json" 2>/dev/null; then
+    printf '  PASS  lockfile still valid JSON after --fix\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  lockfile broken after --fix\n'
+    FAIL=$((FAIL + 1))
+  fi
+
+  # L4. v1 nested `dependencies` shape — exit 1
+  mkdir -p "$TMP/cls-v1"
+  cat > "$TMP/cls-v1/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "@rello-platform/signals": {
+      "version": "git+ssh://git@github.com/rello-platform/signals.git#$CLS_SHA",
+      "resolved": "git+ssh://git@github.com/rello-platform/signals.git#$CLS_SHA",
+      "dependencies": {
+        "nested-dep": {
+          "resolved": "git+ssh://git@github.com/rello-platform/nested.git#$CLS_SHA"
+        }
+      }
+    }
+  }
+}
+JSON
+  assert_exit "v1 nested dependencies ssh — exit 1" "1" "$(run_in_fixture "$TMP/cls-v1" check-lockfile-ssh)"
+
+  # L5. non-github git+ssh is NOT auto-fixable — --fix still exit 1
+  cls_fixture cls-nongh "git+ssh://git@gitlab.example.com/org/repo.git#$CLS_SHA"
+  assert_exit "non-github ssh, --fix unfixable — exit 1" "1" "$(run_in_fixture "$TMP/cls-nongh" check-lockfile-ssh --fix)"
+
+  # L6. mixed github + non-github ssh, --fix — github fixed, exit 1 on remainder
+  mkdir -p "$TMP/cls-mixed"
+  cat > "$TMP/cls-mixed/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "fixture" },
+    "node_modules/a": { "resolved": "$CLS_SSH" },
+    "node_modules/b": { "resolved": "git+ssh://git@gitlab.example.com/org/repo.git#$CLS_SHA" }
+  }
+}
+JSON
+  assert_exit "mixed ssh, --fix — exit 1 (non-github remains)" "1" "$(run_in_fixture "$TMP/cls-mixed" check-lockfile-ssh --fix)"
+  if grep -qF "\"resolved\": \"$CLS_HTTPS\"" "$TMP/cls-mixed/package-lock.json"; then
+    printf '  PASS  mixed --fix still rewrote the github entry\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  mixed --fix did not rewrite the github entry\n'
+    FAIL=$((FAIL + 1))
+  fi
+
+  # L7. missing package-lock.json — exit 2
+  mkdir -p "$TMP/cls-missing"
+  assert_exit "missing package-lock.json — exit 2" "2" "$(run_in_fixture "$TMP/cls-missing" check-lockfile-ssh)"
+
+  # L8. malformed package-lock.json — exit 2
+  mkdir -p "$TMP/cls-malformed"
+  printf '{ not json' > "$TMP/cls-malformed/package-lock.json"
+  assert_exit "malformed package-lock.json — exit 2" "2" "$(run_in_fixture "$TMP/cls-malformed" check-lockfile-ssh)"
+
+  # L9. --root <subdir> resolution — exit 1 on ssh under sub/
+  mkdir -p "$TMP/cls-root"
+  cls_fixture cls-root/sub "$CLS_SSH"
+  assert_exit "--root <subdir> ssh — exit 1" "1" "$(run_in_fixture "$TMP/cls-root" check-lockfile-ssh --root sub)"
+
+  printf '\ncheck-stale-pins x check-lockfile-ssh integration (v0.5.0)\n'
+
+  # C14. current pin + adjacent ssh lockfile — exit 1 (inherits the guard,
+  #      zero hook edits) even though the pin itself is OK.
+  mkdir -p "$TMP/csp-lock-ssh"
+  cat > "$TMP/csp-lock-ssh/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/permissions": "github:rello-platform/permissions#v0.41.0" } }
+JSON
+  cat > "$TMP/csp-lock-ssh/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "fixture" },
+    "node_modules/@rello-platform/permissions": { "resolved": "$CLS_SSH" }
+  }
+}
+JSON
+  assert_exit "stale-pins: OK pin + ssh lockfile — exit 1" "1" "$(csp_run "$TMP/csp-lock-ssh")"
+
+  # C14a. ...and the failure output names the lockfile remediation
+  local csp_lock_msg
+  csp_lock_msg="$( cd "$TMP/csp-lock-ssh" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins 2>&1 || true )"
+  if printf '%s' "$csp_lock_msg" | grep -q "check-lockfile-ssh --fix"; then
+    printf '  PASS  stale-pins failure output names check-lockfile-ssh --fix\n'
+    PASS=$((PASS + 1))
+  else
+    printf '  FAIL  stale-pins failure output missing lockfile remediation; got: %s\n' "$csp_lock_msg"
+    FAIL=$((FAIL + 1))
+  fi
+
+  # C15. current pin + clean adjacent lockfile — exit 0
+  mkdir -p "$TMP/csp-lock-clean"
+  cat > "$TMP/csp-lock-clean/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/permissions": "github:rello-platform/permissions#v0.41.0" } }
+JSON
+  cat > "$TMP/csp-lock-clean/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "fixture" },
+    "node_modules/@rello-platform/permissions": { "resolved": "$CLS_HTTPS" }
+  }
+}
+JSON
+  assert_exit "stale-pins: OK pin + clean lockfile — exit 0" "0" "$(csp_run "$TMP/csp-lock-clean")"
+
+  # C16. no @rello-platform deps + ssh lockfile — STILL exit 1 (the guard
+  #      runs even on the no-deps early path; any git dep can be ssh-stamped).
+  mkdir -p "$TMP/csp-nodeps-ssh"
+  cat > "$TMP/csp-nodeps-ssh/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "left-pad": "^1.0.0" } }
+JSON
+  cat > "$TMP/csp-nodeps-ssh/package-lock.json" <<JSON
+{
+  "name": "fixture",
+  "lockfileVersion": 3,
+  "packages": {
+    "": { "name": "fixture" },
+    "node_modules/some-git-dep": { "resolved": "$CLS_SSH" }
+  }
+}
+JSON
+  assert_exit "stale-pins: no rello deps + ssh lockfile — exit 1" "1" "$(csp_run "$TMP/csp-nodeps-ssh")"
+
+  # C17. ssh-lockfile guard is NOT fail-open offline (local check, no network)
+  assert_exit "stale-pins offline + ssh lockfile — still exit 1" "1" \
+    "$(cd "$TMP/csp-lock-ssh" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_SIMULATE_OFFLINE=1 "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
 
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
