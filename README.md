@@ -347,3 +347,38 @@ harness + floating-refs dogfood the workflow ran). The hook is not auto-installe
 ```sh
 git config core.hooksPath .husky
 ```
+
+## `verify-sql-objects`
+
+Asserts that every Postgres object declared in the consumer's `prisma/sql/*.sql`
+actually **exists in the live database**.
+
+```bash
+npx rello-scripts verify-sql-objects            # resolves the URL from .env
+npx rello-scripts verify-sql-objects --url "postgres://…"
+npx rello-scripts verify-sql-objects --inventory   # dump everything parsed
+```
+
+| exit | meaning |
+|------|---------|
+| 0 | every declared object is present |
+| 1 | an object is **missing** — a push dropped it; restore with `db-apply-sql` |
+| 2 | **UNVERIFIED** — no DB URL, unreachable, or DDL this parser does not model. Never a pass. |
+
+**Why it exists.** `prisma db push` silently drops every object Prisma's DSL
+cannot model: predicated (partial) indexes, `hnsw`/`gin`/`gist`, triggers,
+functions, CHECK constraints, cross-schema views, enum members. It is the
+counterpart to `db-apply-sql` — that one applies the DDL, this one proves it is
+still there.
+
+**`prisma migrate diff` cannot do this job, and the reason is subtle.** For an
+object declared in `prisma/sql/` but not in `schema.prisma`, diff reports drift
+while the object EXISTS, and reports "No difference detected" once it has been
+dropped. The signal disappears at the moment the damage is done, so a clean diff
+is not evidence — it is equally consistent with the object being gone. Only a
+catalog query separates the two.
+
+URL resolution order: `DIRECT_URL`, `DIRECT_DATABASE_URL`, `DATABASE_URL` —
+read from the consumer's `.env` in Node (never shell-sourced, so a malformed
+line cannot abort a caller running under `set -e`), with real environment
+variables taking precedence.

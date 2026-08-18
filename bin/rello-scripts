@@ -20,6 +20,16 @@
 //          per SPEC-PLATFORM-LINT-RULES-AND-HOOKS Phase 1 PR-C.
 // v0.4.0 — adds check-stale-pins (version-staleness gate, tags-not-releases)
 //          per PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC Phase 4 (FIX-11).
+// v0.6.0 — adds verify-sql-objects: asserts every object declared in
+//          prisma/sql/*.sql actually exists in the live database. `prisma db
+//          push` silently DROPS every object Prisma's DSL cannot model
+//          (predicated indexes, hnsw/gin/gist, triggers, functions, CHECK
+//          constraints, cross-schema views, enum members), and `migrate diff`
+//          is structurally blind to the whole class — the drift signal
+//          disappears at the moment the damage is done. Only a catalog query
+//          can see it. Ships here rather than as 13 copies of a 900-line
+//          parser: this package already owns db-apply-sql, the counterpart
+//          operation.
 // v0.5.0 — adds check-lockfile-ssh (Railway-unfetchable git+ssh lockfile guard,
 //          also run by check-stale-pins so consumers inherit it pin-bump-only)
 //          per DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610.
@@ -39,7 +49,16 @@ const SUBCOMMANDS = {
   "schema-change-reminder": "schema-change-reminder.sh",
   "check-stale-pins": "check-stale-pins.sh",
   "check-lockfile-ssh": "check-lockfile-ssh.sh",
+  "verify-sql-objects": "verify-sql-objects.mjs",
 };
+
+// Most subcommands are bash. verify-sql-objects is a Node ESM parser (it walks
+// SQL with dollar-quote/string/comment awareness and queries pg catalogs), so
+// it is dispatched to node. Routing is by file extension rather than a second
+// list, so a future subcommand cannot be added to one table and forgotten in
+// the other.
+const runnerFor = (scriptName) =>
+  scriptName.endsWith(".mjs") || scriptName.endsWith(".js") ? process.execPath : "bash";
 
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
@@ -60,6 +79,8 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  schema-change-reminder                        Pre-commit: remind to verify when prisma/schema.prisma staged\n" +
     "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
     "  check-lockfile-ssh [--root <dir>] [--fix]     Gate: reject git+ssh resolved entries in package-lock.json\n" +
+    "  verify-sql-objects [--url <conn>]             Gate: assert every prisma/sql-declared object EXISTS in the DB\n" +
+    "                     [--sql-dir <dir>]          (exit 1 = missing, 2 = UNVERIFIED and never a pass)\n" +
     "                                                (--fix rewrites github.com entries to git+https, sha preserved)\n" +
     "\n" +
     "Flags:\n" +
@@ -107,7 +128,7 @@ if (ROOT_AWARE.has(subcommand)) {
 }
 
 const scriptPath = path.join(__dirname, "..", "scripts", scriptName);
-const result = spawnSync("bash", [scriptPath, ...passthrough], {
+const result = spawnSync(runnerFor(scriptName), [scriptPath, ...passthrough], {
   stdio: "inherit",
   cwd: process.cwd(),
 });

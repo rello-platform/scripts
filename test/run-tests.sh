@@ -746,6 +746,71 @@ JSON
   assert_exit "stale-pins offline + ssh lockfile — still exit 1" "1" \
     "$(cd "$TMP/csp-lock-ssh" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_SIMULATE_OFFLINE=1 "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
 
+
+  # ── verify-sql-objects ─────────────────────────────────────────────────
+  printf '\nverify-sql-objects\n'
+
+  # DB-independent paths only. The exit-1 (object genuinely missing) path
+  # needs a live database and is proven per-consumer at rollout, not here.
+  vso_run() {
+    ( cd "$1" && shift && env -u DATABASE_URL -u DIRECT_URL -u DIRECT_DATABASE_URL \
+        "$CLI" verify-sql-objects "$@" >/dev/null 2>&1; echo $? )
+  }
+  vso_out() {
+    ( cd "$1" && shift && env -u DATABASE_URL -u DIRECT_URL -u DIRECT_DATABASE_URL \
+        "$CLI" verify-sql-objects "$@" 2>&1 )
+  }
+
+  mkdir -p "$TMP/vso-ok/prisma/sql"
+  printf '{"name":"fixture"}\n' > "$TMP/vso-ok/package.json"
+  cat > "$TMP/vso-ok/prisma/sql/001.sql" <<'SQL'
+CREATE INDEX IF NOT EXISTS idx_thing ON "Thing" ("a");
+ALTER TYPE "public"."Status" ADD VALUE IF NOT EXISTS 'ARCHIVED';
+SQL
+
+  # V1. No database URL is UNVERIFIED (2), never a pass. A repo whose URL
+  # variable is spelled differently would otherwise read green forever.
+  assert_exit "no DB url — exit 2 (UNVERIFIED, not pass)" "2" "$(vso_run "$TMP/vso-ok")"
+
+  # V2. ⚑ An unrecognised flag must be a hard error, not a silent no-op.
+  # Measured 2026-08-18: `--sqlDir` (the flag is `--sql-dir`) was dropped
+  # without a word, the run silently fell back to the default directory, and
+  # the survey compared one repo's declarations against another repo's
+  # database while reporting total confidence.
+  assert_exit "unknown flag — exit 2" "2" "$(vso_run "$TMP/vso-ok" --sqlDir /nope)"
+  # NB: capture FIRST, then grep. The harness runs under `set -o pipefail`, so
+  # `vso_out … | grep -q` yields verify-sql-objects' exit 2 even when grep
+  # matches — the assertion would fail on output that is exactly right.
+  # `|| true` because these paths exit non-zero BY DESIGN and the harness
+  # runs under `set -e` — without it the assignment aborts the whole suite.
+  vso_unknown_out="$(vso_out "$TMP/vso-ok" --sqlDir /nope || true)"
+  if printf '%s' "$vso_unknown_out" | grep -q "unrecognised argument"; then
+    printf '  PASS  unknown flag names itself\n'; PASS=$((PASS + 1))
+  else
+    printf '  FAIL  unknown flag names itself\n'; FAIL=$((FAIL + 1))
+  fi
+
+  # V3. ALTER TYPE … ADD VALUE is MODELLED, not reported as a parser gap.
+  # Six of these across Harvest-Home / Open-House-Hub / Newsletter-Studio were
+  # the only thing holding those three repos at UNVERIFIED.
+  vso_inv_out="$(vso_out "$TMP/vso-ok" --inventory || true)"
+  if printf '%s' "$vso_inv_out" | grep -q "enumvalue public.Status.ARCHIVED"; then
+    printf '  PASS  ALTER TYPE ADD VALUE parsed as an enumvalue\n'; PASS=$((PASS + 1))
+  else
+    printf '  FAIL  ALTER TYPE ADD VALUE parsed as an enumvalue\n'; FAIL=$((FAIL + 1))
+  fi
+
+  # V4. DDL the parser does not model is UNVERIFIED, never silently skipped.
+  mkdir -p "$TMP/vso-gap/prisma/sql"
+  printf '{"name":"fixture"}\n' > "$TMP/vso-gap/package.json"
+  printf 'CREATE FOREIGN TABLE weird () SERVER s;\n' > "$TMP/vso-gap/prisma/sql/001.sql"
+  assert_exit "unmodelled DDL — exit 2" "2" "$(vso_run "$TMP/vso-gap")"
+
+  # V5. A missing prisma/sql directory is UNVERIFIED, not a vacuous pass.
+  mkdir -p "$TMP/vso-nodir"
+  printf '{"name":"fixture"}\n' > "$TMP/vso-nodir/package.json"
+  assert_exit "no prisma/sql dir — exit 2" "2" "$(vso_run "$TMP/vso-nodir")"
+
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     exit 1
