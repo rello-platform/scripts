@@ -446,3 +446,52 @@ package, which makes git-dep preparation recursive.
 
 Committing `dist/` plus a gate on the tag keeps that cost at zero and moves the
 failure to the one moment someone is already paying attention.
+
+## `check-manifest-regression` — a manifest must never go backwards
+
+`check-dist-fresh` asks whether the committed `dist/` reproduces from the
+committed `src/`. It cannot see the file that decides which of those a consumer
+actually *resolves*. On 2026-09-04 a rollout script took `package.json` wholesale
+from a clone behind origin; `@rello-platform/api-client` went 2.25.0 → 2.23.0 and
+lost its dual ESM/CJS `exports` map. **The dist gate was green throughout, and
+honestly so** — it was answering a different question. This is the second gate.
+
+Baseline is the newest `v*` tag, because consumers install tags. Checks: version
+never decreases; no `main`/`module`/`types`/`typings`/`browser`/`bin` entry the
+baseline had disappears; no `exports` path or condition the baseline had
+disappears.
+
+⚑ **Absence is not narrowing.** Five of the nine platform packages ship no
+`exports` key at all. A baseline without one imposes no constraint and adding one
+later is widening. A check that read absence as regression would fail five repos
+on day one and be switched off inside a week.
+
+## `check-explicit-apikey` — who relies on the implicit `RELLO_API_KEY`
+
+**Measured 2026-09-04 across the 15 canonical consumer repos: 0 of 10 package
+construction sites rely on the implicit fallback.**
+
+That number replaces an earlier "24 of 34", which was wrong, and two intermediate
+figures of mine that were also wrong. All three failed the same way — they
+matched on the *name* `RelloClient` / `createRelloClient` rather than on a binding
+to an `@rello-platform/api-client` import:
+
+| Measurement | Result | Why it was wrong |
+|---|---|---|
+| original `grep -q "apiKey"` | 24 of 34 | counted local classes and factories that never touch the package; matched `apiKey` inside comments |
+| scanner, first cut | 25 of 32 | required `apiKey:`, so ES6 shorthand `{ apiKey }` read as implicit |
+| scanner, + shorthand | 22 of 32 | still name-matched: 12 MarketIntel calls to its own wrapper, 1 HomeReady local class |
+| **scanner, + binding resolution** | **0 of 10** | only identifiers imported from the package count |
+
+The two collisions are real code, not edge cases: MarketIntel imports the package
+as `createSharedClient` and exports its *own* `createRelloClient` wrapper;
+HomeReady declares a local `class RelloClient`. Neither can use the fallback.
+
+⚑ **What the zero does and does not mean.** All ten package sites pass a key
+explicitly — but two of them pass the *shared* key by hand
+(`apiKey: process.env.RELLO_API_KEY`, at `Harvest-Home/src/lib/rello-client.ts:21`
+and `HomeReady/src/lib/integrations/rello-client.ts:25`). Syntactically explicit,
+same exposure. Separately, **51 sites across the canonical spokes read
+`process.env.RELLO_API_KEY` directly** on hand-rolled fetch paths that never
+construct the package client at all. Removing the fallback in v3.0.0 breaks none
+of them, and fixes none of them either.

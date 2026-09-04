@@ -12,6 +12,8 @@
 //   check-lockfile-ssh      — gate: rejects git+ssh resolved entries in package-lock.json (--fix rewrites)
 //   check-dist-fresh        — gate: committed dist/ must byte-match a fresh build of src/ (tag-consumable artifact)
 //   tag-dist-gate           — pre-push hook: refuses a v* tag carrying a stale/unverifiable dist/ (branch pushes untouched)
+//   check-manifest-regression — gate: a package manifest must never go backwards (version down / exports narrowed)
+//   check-explicit-apikey   — counts RelloClient sites relying on the implicit RELLO_API_KEY fallback
 //
 // Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
 // criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
@@ -67,6 +69,8 @@ const SUBCOMMANDS = {
   "verify-sql-objects": "verify-sql-objects.mjs",
   "check-dist-fresh": "check-dist-fresh.mjs",
   "tag-dist-gate": "tag-dist-gate.mjs",
+  "check-manifest-regression": "check-manifest-regression.mjs",
+  "check-explicit-apikey": "check-explicit-apikey.mjs",
 };
 
 // Most subcommands are bash. verify-sql-objects is a Node ESM parser (it walks
@@ -80,6 +84,8 @@ const runnerFor = (scriptName) =>
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
 const ROOT_AWARE = new Set([
+  "check-manifest-regression",
+  "check-explicit-apikey",
   "floating-refs",
   "roles",
   "check-stale-pins",
@@ -103,6 +109,9 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
     "  check-lockfile-ssh [--root <dir>] [--fix]     Gate: reject git+ssh resolved entries in package-lock.json\n" +
     "  check-dist-fresh [--root <dir>] [--ref <r>]   Gate: committed dist/ must reproduce byte-identically from src/\n" +
+    "  check-manifest-regression [--root <dir>]      Gate: version never decreases, exports never narrows\n" +
+    "                            [--against <ref>]   (baseline = newest v* tag; absence of exports is not narrowing)\n" +
+    "  check-explicit-apikey [--root <dir>]          Count RelloClient sites relying on the implicit RELLO_API_KEY\n" +
     "  tag-dist-gate                                 Pre-push hook: refuse a v* tag whose dist/ is stale/UNVERIFIED\n" +
     "                                                (reads pre-push stdin; branch pushes pass through untouched)\n" +
     "                                                (exit 1 = STALE, 2 = UNVERIFIED and never a pass)\n" +

@@ -844,6 +844,96 @@ SQL
   # D5. --root pointing nowhere — UNVERIFIED.
   assert_exit "--root nonexistent — exit 2" "2" "$(run_in_fixture "$TMP/df-nodist" check-dist-fresh --root /nonexistent-df)"
 
+  # ── check-manifest-regression (E) ─────────────────────────────────────────
+  # The pure diff is unit-tested in test/manifest-regression-cases.mjs. These
+  # cells pin the FAIL-CLOSED half, which only exists at the CLI boundary.
+
+  # E1. Not a git work tree — UNVERIFIED, never a pass.
+  mkdir -p "$TMP/mr-nogit"
+  printf '{"name":"f","version":"1.0.0"}\n' > "$TMP/mr-nogit/package.json"
+  assert_exit "manifest: not a git work tree — exit 2" "2" "$(run_in_fixture "$TMP/mr-nogit" check-manifest-regression)"
+
+  # E2. No package.json — UNVERIFIED.
+  mkdir -p "$TMP/mr-nopkg"
+  ( cd "$TMP/mr-nopkg" && git init -q && echo x > a.txt \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+  assert_exit "manifest: no package.json — exit 2" "2" "$(run_in_fixture "$TMP/mr-nopkg" check-manifest-regression)"
+
+  # E3. No v* tag to compare against — UNVERIFIED. A package with no published
+  # state has no manifest to regress FROM, and that is not a pass.
+  mkdir -p "$TMP/mr-notag"
+  ( cd "$TMP/mr-notag" && git init -q \
+      && printf '{"name":"f","version":"1.0.0"}\n' > package.json \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+  assert_exit "manifest: no baseline tag — exit 2" "2" "$(run_in_fixture "$TMP/mr-notag" check-manifest-regression)"
+
+  # E4. A baseline ref that does not exist — UNVERIFIED, not a pass.
+  assert_exit "manifest: missing --against ref — exit 2" "2" "$(run_in_fixture "$TMP/mr-notag" check-manifest-regression --against v9.9.9)"
+
+  # E5. GREEN on an unchanged manifest against a real tag.
+  ( cd "$TMP/mr-notag" && git tag v1.0.0 )
+  assert_exit "manifest: unchanged vs tag — exit 0" "0" "$(run_in_fixture "$TMP/mr-notag" check-manifest-regression)"
+
+  # E6. 🔴 RED on the real incident: version decrease.
+  ( cd "$TMP/mr-notag" && printf '{"name":"f","version":"0.9.0"}\n' > package.json )
+  assert_exit "manifest: version decrease — exit 1" "1" "$(run_in_fixture "$TMP/mr-notag" check-manifest-regression)"
+
+  # E7. 🔴 RED on a narrowed exports map.
+  mkdir -p "$TMP/mr-narrow"
+  ( cd "$TMP/mr-narrow" && git init -q \
+      && printf '{"name":"f","version":"1.0.0","exports":{".":{"import":"./a.js","require":"./a.cjs"}}}\n' > package.json \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i && git tag v1.0.0 \
+      && printf '{"name":"f","version":"1.0.0","exports":{".":{"import":"./a.js"}}}\n' > package.json )
+  assert_exit "manifest: exports narrowed — exit 1" "1" "$(run_in_fixture "$TMP/mr-narrow" check-manifest-regression)"
+
+  # E8. 🟢 GREEN on ABSENCE — five of nine platform packages ship no exports key.
+  # A check that read absence as narrowing would fail five repos on day one.
+  mkdir -p "$TMP/mr-absent"
+  ( cd "$TMP/mr-absent" && git init -q \
+      && printf '{"name":"f","version":"1.0.0","main":"./a.js"}\n' > package.json \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i && git tag v1.0.0 \
+      && printf '{"name":"f","version":"1.1.0","main":"./a.js"}\n' > package.json )
+  assert_exit "manifest: absence is not narrowing — exit 0" "0" "$(run_in_fixture "$TMP/mr-absent" check-manifest-regression)"
+
+  # E9. 🟢 GREEN on ADDING an exports map — widening is not regression.
+  ( cd "$TMP/mr-absent" && printf '{"name":"f","version":"1.1.0","main":"./a.js","exports":{".":"./a.js"}}\n' > package.json )
+  assert_exit "manifest: adding exports is widening — exit 0" "0" "$(run_in_fixture "$TMP/mr-absent" check-manifest-regression)"
+
+  # ── check-explicit-apikey (F) ─────────────────────────────────────────────
+
+  # F1. No source directory — UNVERIFIED.
+  assert_exit "apikey: --root nonexistent — exit 2" "2" "$(run_in_fixture "$TMP" check-explicit-apikey --root /nonexistent-ak)"
+
+  # F2. Zero source files scanned — UNVERIFIED. A guard that examined nothing
+  # must never report green.
+  mkdir -p "$TMP/ak-empty/src"
+  assert_exit "apikey: scanned 0 files — exit 2" "2" "$(run_in_fixture "$TMP/ak-empty" check-explicit-apikey)"
+
+  # F3. 🔴 RED on an implicit construction site.
+  mkdir -p "$TMP/ak-implicit/src"
+  cat > "$TMP/ak-implicit/src/c.ts" <<'EOF'
+import { RelloClient } from "@rello-platform/api-client";
+export const c = new RelloClient({ appSlug: "x" });
+EOF
+  assert_exit "apikey: implicit site — exit 1" "1" "$(run_in_fixture "$TMP/ak-implicit" check-explicit-apikey)"
+
+  # F4. 🟢 GREEN on an explicit site.
+  mkdir -p "$TMP/ak-explicit/src"
+  cat > "$TMP/ak-explicit/src/c.ts" <<'EOF'
+import { createRelloClient } from "@rello-platform/api-client";
+export const c = createRelloClient({ appSlug: "x", apiKey: process.env.X_TO_RELLO_API_KEY });
+EOF
+  assert_exit "apikey: explicit site — exit 0" "0" "$(run_in_fixture "$TMP/ak-explicit" check-explicit-apikey)"
+
+  # F5. 🟢 GREEN on a LOCAL class of the same name — not this package, so it
+  # cannot use the fallback. Counting it inflated the platform figure.
+  mkdir -p "$TMP/ak-local/src"
+  cat > "$TMP/ak-local/src/c.ts" <<'EOF'
+class RelloClient { constructor(k) {} }
+export const c = new RelloClient();
+EOF
+  assert_exit "apikey: local same-named class not counted — exit 0" "0" "$(run_in_fixture "$TMP/ak-local" check-explicit-apikey)"
+
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     exit 1
