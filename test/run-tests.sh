@@ -889,7 +889,11 @@ SQL
   # E8. 🟢 GREEN on ABSENCE — five of nine platform packages ship no exports key.
   # A check that read absence as narrowing would fail five repos on day one.
   mkdir -p "$TMP/mr-absent"
+  # The manifest's targets must EXIST — v0.11.0 checks value, not just presence.
+  # These cells are about absence-is-not-narrowing, so the file is created to
+  # keep the cell testing the one thing it is for.
   ( cd "$TMP/mr-absent" && git init -q \
+      && printf 'module.exports={}\n' > a.js \
       && printf '{"name":"f","version":"1.0.0","main":"./a.js"}\n' > package.json \
       && git add -A && git -c user.email=t@t -c user.name=t commit -qm i && git tag v1.0.0 \
       && printf '{"name":"f","version":"1.1.0","main":"./a.js"}\n' > package.json )

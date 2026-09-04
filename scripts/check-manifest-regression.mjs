@@ -22,11 +22,26 @@
  * from the bad main. The exposure was entirely forward — the next tag would
  * have shipped it silently.
  *
+ * ⚑ WHAT "BACKWARDS" MEANS HERE, stated narrowly on purpose. This gate answers
+ * two questions and no others: (1) has a KEY the baseline had disappeared, and
+ * (2) does every target the manifest names actually EXIST in the tree that
+ * ships. It does not police semantics it cannot evaluate — a narrowed `engines`
+ * range is a real regression and is deliberately NOT checked, because deciding
+ * whether one semver range is narrower than another is a judgement this gate
+ * would get wrong quietly. Better an honest gap than a check nobody trusts.
+ *
  * WHAT IT CHECKS, against the last published state (default: the newest v* tag)
  *   1. `version` never DECREASES.
  *   2. No manifest entry point present in the baseline disappears
  *      (`main`, `module`, `types`, `typings`, `browser`, `bin` keys).
  *   3. No `exports` path or condition present in the baseline disappears.
+ *   4. `private: true` is not newly added — it does not remove a key, and it
+ *      stops the package being publishable at all.
+ *   5. VALUE, not just presence: every path `main`/`module`/`types`/`browser`/
+ *      `bin`/`exports` names must exist. Presence-only comparison passes
+ *      `main` retargeted to a file that is not there, and an `exports` leaf
+ *      retargeted to nothing with its keys identical — the motivating defect
+ *      expressed by value instead of by key.
  *
  * ⚑ ABSENCE IS NOT NARROWING. Five of the nine platform packages legitimately
  * ship no `exports` key at all. A baseline without one imposes no constraint,
@@ -111,6 +126,66 @@ export function flattenExports(exportsValue, subpath = ".", conditions = []) {
   return out;
 }
 
+/**
+ * Every filesystem target a manifest names, as {field, target} pairs.
+ *
+ * ⚑ WHY THIS EXISTS SEPARATELY FROM diffManifests. That function compares KEYS:
+ * it asks whether something the baseline had is now gone. It never looks at
+ * what a key POINTS AT, so `main` retargeted to a file that does not exist, or
+ * an exports leaf retargeted to nothing, both pass it clean — the manifest is
+ * structurally identical and semantically dead. The 2026-09-04 regression is
+ * expressible either way; the gate only spoke one of the two languages.
+ */
+export function collectTargets(manifest) {
+  const out = [];
+  for (const field of ENTRY_FIELDS) {
+    const v = manifest[field];
+    if (typeof v === "string") out.push({ field, target: v });
+  }
+  if (manifest.bin && typeof manifest.bin === "string") {
+    out.push({ field: "bin", target: manifest.bin });
+  } else if (manifest.bin && typeof manifest.bin === "object") {
+    for (const [name, v] of Object.entries(manifest.bin)) {
+      if (typeof v === "string") out.push({ field: `bin.${name}`, target: v });
+    }
+  }
+  for (const leaf of flattenExportsWithTargets(manifest.exports)) out.push(leaf);
+  // A relative path is the only kind that names a file in this tree. Bare
+  // specifiers and URLs are somebody else's problem by construction.
+  return out.filter((t) => t.target.startsWith("./") || !/^[a-z]+:/i.test(t.target));
+}
+
+/** Like flattenExports, but keeps the target string alongside the leaf key. */
+export function flattenExportsWithTargets(exportsValue, subpath = ".", conditions = []) {
+  const out = [];
+  if (exportsValue == null) return out;
+  if (typeof exportsValue === "string") {
+    out.push({ field: `exports["${subpath}"${conditions.length ? ` [${conditions.join(">")}]` : ""}]`, target: exportsValue });
+    return out;
+  }
+  if (Array.isArray(exportsValue)) return out; // fallback array — not a single target
+  if (typeof exportsValue !== "object") return out;
+  for (const [key, value] of Object.entries(exportsValue)) {
+    if (key.startsWith(".")) out.push(...flattenExportsWithTargets(value, key, conditions));
+    else out.push(...flattenExportsWithTargets(value, subpath, [...conditions, key]));
+  }
+  return out;
+}
+
+/**
+ * Which named targets are missing from `filesPresent`.
+ *
+ * Pure so the same function serves both questions: "does it exist in the work
+ * tree" and "would it be in the published tarball". A target can pass the first
+ * and fail the second — `files: ["README.md"]` publishes no code while every
+ * path on disk is exactly where the manifest says.
+ */
+export function missingTargets(targets, filesPresent) {
+  const norm = (p) => p.replace(/^\.\//, "").replace(/^\/+/, "");
+  const have = new Set([...filesPresent].map(norm));
+  return targets.filter((t) => !have.has(norm(t.target)));
+}
+
 /** Manifest entry-point fields whose disappearance is a regression. */
 const ENTRY_FIELDS = ["main", "module", "types", "typings", "browser"];
 
@@ -159,6 +234,16 @@ export function diffManifests(baseline, current) {
     if (!curBins.has(b)) {
       problems.push({ kind: "bin-removed", detail: `bin "${b}" was present and is now absent` });
     }
+  }
+
+  // `private: true` on a package that was publishable is a regression by any
+  // reading: it does not change a single key's presence, and it stops the
+  // package being publishable at all.
+  if (!baseline.private && current.private === true) {
+    problems.push({
+      kind: "private-added",
+      detail: '"private": true was added — this package was publishable and is no longer',
+    });
   }
 
   // 3 — exports must not narrow. ABSENCE IN THE BASELINE IS NOT A CONSTRAINT:
@@ -269,7 +354,70 @@ function main() {
     fail(`UNVERIFIED: cannot read package.json at ${ref}: ${err.message}`, "baseline-unreadable");
   }
 
-  const { problems, ok } = diffManifests(baseline, current);
+  const { problems, ok: keysOk } = diffManifests(baseline, current);
+
+  // ── VALUE, not presence ────────────────────────────────────────────────────
+  //
+  // diffManifests compares KEYS. It cannot see that `main` now points at a file
+  // that is not there, or that `files` was narrowed until the tarball carries no
+  // code — the manifest is structurally identical and semantically dead. Two
+  // questions, asked separately:
+  //
+  //   (a) does the target exist in the WORK TREE?   — how a git-tag install
+  //       resolves, which is how this platform installs @rello-platform/*
+  //   (b) would the target be in the PUBLISHED TARBALL? — how a registry
+  //       install resolves, which is how rello-ui and Rello-Slugs ship
+  //
+  // A package can pass (a) and fail (b): `files: ["README.md"]` leaves every
+  // path exactly where the manifest says and publishes none of them.
+  const targets = collectTargets(current);
+
+  const onDisk = targets.filter((t) => {
+    const abs2 = path.resolve(abs, t.target.replace(/^\.\//, ""));
+    return fs.existsSync(abs2);
+  });
+  for (const t of targets) {
+    if (!onDisk.includes(t)) {
+      problems.push({
+        kind: "target-missing",
+        detail: `${t.field} points at "${t.target}", which does not exist in the tree`,
+      });
+    }
+  }
+
+  // (b) is only askable when npm can tell us, and only meaningful for a package
+  // that is actually published. A failure to run npm pack is UNVERIFIED for that
+  // half — never a pass — but it must not mask the (a) result already computed.
+  let packedProblems = [];
+  let packVerdict = "skipped: private or unpublishable";
+  if (current.private !== true) {
+    try {
+      const out = execFileSync("npm", ["pack", "--dry-run", "--json"], {
+        cwd: abs,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        maxBuffer: 32 * 1024 * 1024,
+      });
+      const parsed = JSON.parse(out);
+      const files = (parsed?.[0]?.files ?? []).map((f) => f.path);
+      if (files.length === 0) {
+        packVerdict = "UNVERIFIED: npm pack reported no files";
+      } else {
+        packVerdict = `${files.length} files in the tarball`;
+        packedProblems = missingTargets(targets, files).map((t) => ({
+          kind: "target-not-published",
+          detail:
+            `${t.field} points at "${t.target}", which EXISTS but is not in the published ` +
+            `tarball — check "files"`,
+        }));
+        problems.push(...packedProblems);
+      }
+    } catch (err) {
+      packVerdict = `UNVERIFIED: npm pack failed (${err instanceof Error ? err.message.split("\n")[0] : String(err)})`;
+    }
+  }
+
+  const ok = problems.length === 0;
   const label = `${current.name ?? path.basename(abs)}`;
 
   if (JSON_MODE) {
@@ -281,6 +429,8 @@ function main() {
           baselineVersion: baseline.version,
           currentVersion: current.version,
           verdict: ok ? "OK" : "REGRESSION",
+          packVerdict,
+          targetsChecked: targets.length,
           problems,
         },
         null,

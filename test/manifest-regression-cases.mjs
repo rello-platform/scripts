@@ -17,6 +17,8 @@ import {
   flattenExports,
   diffManifests,
   newestVersionTag,
+  collectTargets,
+  missingTargets,
 } from "../scripts/check-manifest-regression.mjs";
 import { scanSource, importedCtorNames } from "../scripts/check-explicit-apikey.mjs";
 import { priorVersionTag } from "../scripts/tag-dist-gate.mjs";
@@ -315,6 +317,70 @@ t("a tag below every existing one has no baseline", () => {
 
 t("a non-semver tag yields no baseline rather than a wrong one", () => {
   assert.equal(priorVersionTag(".", "nightly", ["v1.0.0"]), null);
+});
+
+process.stdout.write("\ncheck-manifest-regression — VALUE, not presence\n");
+
+t("🔴 collectTargets sees every path the manifest names", () => {
+  const m = {
+    main: "./dist/index.js",
+    module: "./dist/index.mjs",
+    types: "./dist/index.d.ts",
+    bin: { "a-tool": "bin/a.js" },
+    exports: { ".": { import: "./dist/i.js", require: "./dist/i.cjs" }, "./sub": "./dist/sub.js" },
+  };
+  const fields = collectTargets(m).map((x) => x.field);
+  assert.ok(fields.includes("main"));
+  assert.ok(fields.includes("module"));
+  assert.ok(fields.includes("types"));
+  assert.ok(fields.includes("bin.a-tool"));
+  assert.equal(collectTargets(m).length, 7);
+});
+
+t("🔴 AGENT 5's CASE: an exports leaf retargeted to nothing, keys IDENTICAL", () => {
+  // diffManifests passes this clean — every key it compares is unchanged. Only
+  // looking at the VALUE catches it.
+  const before = { version: "1.0.0", exports: { ".": { import: "./dist/i.js" } } };
+  const after = { version: "1.0.0", exports: { ".": { import: "./dist/gone.js" } } };
+  assert.equal(diffManifests(before, after).ok, true, "key comparison is blind to this");
+
+  const missing = missingTargets(collectTargets(after), ["dist/i.js"]);
+  assert.equal(missing.length, 1);
+  assert.match(missing[0].target, /gone\.js/);
+});
+
+t("🔴 AGENT 5's CASE: main retargeted to a file that is not there", () => {
+  const m = { main: "./dist/nope.js" };
+  assert.equal(missingTargets(collectTargets(m), ["dist/index.js"]).length, 1);
+});
+
+t("🔴 AGENT 5's CASE: files narrowed so the tarball carries no code", () => {
+  // The target EXISTS on disk and is absent from the published file list. This
+  // is the case that passes an existence check and still ships nothing.
+  const m = { main: "./dist/index.js", exports: { ".": "./dist/index.js" } };
+  const onDisk = ["dist/index.js", "README.md"];
+  const packed = ["README.md"];
+  assert.equal(missingTargets(collectTargets(m), onDisk).length, 0, "exists in the tree");
+  assert.equal(missingTargets(collectTargets(m), packed).length, 2, "absent from the tarball");
+});
+
+t("🟢 CONTROL: targets that exist report nothing", () => {
+  const m = { main: "./dist/index.js", exports: { ".": { import: "./dist/index.js" } } };
+  assert.equal(missingTargets(collectTargets(m), ["dist/index.js"]).length, 0);
+});
+
+t("leading ./ is normalised on both sides, not compared literally", () => {
+  assert.equal(missingTargets([{ field: "main", target: "./a.js" }], ["a.js"]).length, 0);
+  assert.equal(missingTargets([{ field: "main", target: "a.js" }], ["./a.js"]).length, 0);
+});
+
+t("🔴 private: true added is a regression; already-private is not", () => {
+  assert.equal(diffManifests({ version: "1.0.0" }, { version: "1.0.0", private: true }).ok, false);
+  assert.equal(
+    diffManifests({ version: "1.0.0", private: true }, { version: "1.0.0", private: true }).ok,
+    true,
+    "a package that was always private has not regressed",
+  );
 });
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
