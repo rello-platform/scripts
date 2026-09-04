@@ -152,7 +152,17 @@ export function collectTargets(manifest) {
   for (const leaf of flattenExportsWithTargets(manifest.exports)) out.push(leaf);
   // A relative path is the only kind that names a file in this tree. Bare
   // specifiers and URLs are somebody else's problem by construction.
-  return out.filter((t) => t.target.startsWith("./") || !/^[a-z]+:/i.test(t.target));
+  //
+  // ⚑ SUBPATH PATTERNS ARE NOT PATHS. `"./schemas/*": "./dist/schemas/*.js"` is
+  // a legitimate npm exports pattern, and `./dist/schemas/*.js` is a glob that
+  // never names a file. Treating it literally made this check report four
+  // missing targets on a HEALTHY published tag (@rello-platform/signals
+  // v0.31.0) the first time it ran against production — a spectacular finding,
+  // and entirely false. Patterns are carried through with `isPattern` so the
+  // caller can expand them instead of comparing them.
+  return out
+    .filter((t) => t.target.startsWith("./") || !/^[a-z]+:/i.test(t.target))
+    .map((t) => (t.target.includes("*") ? { ...t, isPattern: true } : t));
 }
 
 /** Like flattenExports, but keeps the target string alongside the leaf key. */
@@ -183,7 +193,20 @@ export function flattenExportsWithTargets(exportsValue, subpath = ".", condition
 export function missingTargets(targets, filesPresent) {
   const norm = (p) => p.replace(/^\.\//, "").replace(/^\/+/, "");
   const have = new Set([...filesPresent].map(norm));
-  return targets.filter((t) => !have.has(norm(t.target)));
+  const all = [...have];
+  return targets.filter((t) => {
+    const target = norm(t.target);
+    if (t.isPattern) {
+      // A pattern is satisfied by ANY match. Zero matches is still a real
+      // finding — an exports pattern resolving to nothing is as broken as a
+      // literal path that does not exist — but one match is enough.
+      const rx = new RegExp(
+        "^" + target.split("*").map((x) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$",
+      );
+      return !all.some((f) => rx.test(f));
+    }
+    return !have.has(target);
+  });
 }
 
 /** Manifest entry-point fields whose disappearance is a regression. */
@@ -372,10 +395,20 @@ function main() {
   // path exactly where the manifest says and publishes none of them.
   const targets = collectTargets(current);
 
-  const onDisk = targets.filter((t) => {
-    const abs2 = path.resolve(abs, t.target.replace(/^\.\//, ""));
-    return fs.existsSync(abs2);
-  });
+  // Walk the tree once so pattern targets can be matched against real files.
+  const treeFiles = (function walk(dir, acc = [], base = abs) {
+    if (!fs.existsSync(dir)) return acc;
+    for (const e of fs.readdirSync(dir)) {
+      if (e === "node_modules" || e === ".git") continue;
+      const f = path.join(dir, e);
+      const st = fs.statSync(f);
+      if (st.isDirectory()) walk(f, acc, base);
+      else acc.push(path.relative(base, f));
+    }
+    return acc;
+  })(abs);
+
+  const onDisk = targets.filter((t) => missingTargets([t], treeFiles).length === 0);
   for (const t of targets) {
     if (!onDisk.includes(t)) {
       problems.push({
@@ -404,7 +437,10 @@ function main() {
         packVerdict = "UNVERIFIED: npm pack reported no files";
       } else {
         packVerdict = `${files.length} files in the tarball`;
-        packedProblems = missingTargets(targets, files).map((t) => ({
+        // Only targets that EXIST can be "present but unpublished". Running
+        // this over all targets made the two messages contradict: one said a
+        // target did not exist, the next said it existed but was unpublished.
+        packedProblems = missingTargets(onDisk, files).map((t) => ({
           kind: "target-not-published",
           detail:
             `${t.field} points at "${t.target}", which EXISTS but is not in the published ` +

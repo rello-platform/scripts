@@ -71,6 +71,7 @@ const SUBCOMMANDS = {
   "tag-dist-gate": "tag-dist-gate.mjs",
   "check-manifest-regression": "check-manifest-regression.mjs",
   "check-explicit-apikey": "check-explicit-apikey.mjs",
+  "audit-published-tags": "audit-published-tags.mjs",
 };
 
 // Most subcommands are bash. verify-sql-objects is a Node ESM parser (it walks
@@ -84,6 +85,7 @@ const runnerFor = (scriptName) =>
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
 const ROOT_AWARE = new Set([
+  "audit-published-tags",
   "check-manifest-regression",
   "check-explicit-apikey",
   "floating-refs",

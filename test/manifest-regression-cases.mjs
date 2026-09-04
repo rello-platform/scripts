@@ -383,5 +383,35 @@ t("🔴 private: true added is a regression; already-private is not", () => {
   );
 });
 
+t("🔴 THE FALSE POSITIVE THIS SHIPPED WITH: a subpath PATTERN is not a path", () => {
+  // @rello-platform/signals v0.31.0 declares `"./schemas/*": "./dist/schemas/*.js"`.
+  // Comparing that glob as a literal path reported four missing targets on a
+  // perfectly healthy PUBLISHED tag the first time the detector ran against
+  // production. Spectacular, and entirely false.
+  const m = { exports: { "./schemas/*": { import: "./dist/schemas/*.js" } } };
+  const targets = collectTargets(m);
+  assert.equal(targets[0].isPattern, true, "must be carried as a pattern, not a path");
+  assert.equal(
+    missingTargets(targets, ["dist/schemas/lead.js", "dist/index.js"]).length,
+    0,
+    "one matching file satisfies the pattern",
+  );
+});
+
+t("🔴 CONTROL IS NOT TOOTHLESS: a pattern matching NOTHING is still a finding", () => {
+  // The fix must not turn every pattern into an automatic pass. An exports
+  // pattern that resolves to no file at all is as broken as a literal path
+  // that does not exist.
+  const m = { exports: { "./schemas/*": { import: "./dist/schemas/*.js" } } };
+  assert.equal(missingTargets(collectTargets(m), ["dist/index.js"]).length, 1);
+});
+
+t("a pattern does not match across directory boundaries by accident", () => {
+  const m = { exports: { "./s/*": { import: "./dist/s/*.js" } } };
+  // `dist/other/x.js` must not satisfy `dist/s/*.js`.
+  assert.equal(missingTargets(collectTargets(m), ["dist/other/x.js"]).length, 1);
+  assert.equal(missingTargets(collectTargets(m), ["dist/s/x.js"]).length, 0);
+});
+
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

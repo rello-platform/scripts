@@ -1,0 +1,7 @@
+# Exemptions from check-dist-fresh, BY NAME and WITH A REASON. Both halves are
+# required — an entry with no reason is itself an error, so an exemption cannot
+# be added without saying why. The exemption is NARROW: it covers only
+# `no-build-script` and `no-committed-dist`. A STALE verdict is never exemptable,
+# and neither is a failed, non-deterministic, or unrunnable build.
+
+@rello-platform/scripts: this package ships executable .mjs and .sh scripts directly from scripts/ and bin/ with no compile step, so there is no build script and no committed dist/ to reproduce. Consumers run it via npx against a git tag; the files they execute are the files in the repo. Declared 2026-09-04 when audit-published-tags began checking live tags and correctly reported this repo UNVERIFIED forever.
