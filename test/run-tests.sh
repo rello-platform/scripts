@@ -811,6 +811,39 @@ SQL
   printf '{"name":"fixture"}\n' > "$TMP/vso-nodir/package.json"
   assert_exit "no prisma/sql dir — exit 2" "2" "$(vso_run "$TMP/vso-nodir")"
 
+  # ── check-dist-fresh ──────────────────────────────────────────────────────
+  # The pure classification core is pinned in test/dist-fresh-cases.mjs (the
+  # `scanSource` pattern). Here we pin the CLI-level fail-closed contract, which
+  # is the half that decides whether a caller can be fooled.
+  printf '\ncheck-dist-fresh:\n'
+  node "$PKG_ROOT/test/dist-fresh-cases.mjs" >/dev/null 2>&1
+  assert_exit "pure core unit tests" "0" "$?"
+
+  # D1. Not a git work tree — UNVERIFIED, never a pass.
+  mkdir -p "$TMP/df-nogit"
+  printf '{"name":"f","scripts":{"build":"tsc"}}\n' > "$TMP/df-nogit/package.json"
+  assert_exit "not a git work tree — exit 2" "2" "$(run_in_fixture "$TMP/df-nogit" check-dist-fresh)"
+
+  # D2. No build script — UNVERIFIED. Nothing to reproduce from.
+  mkdir -p "$TMP/df-nobuild"
+  ( cd "$TMP/df-nobuild" && git init -q && printf '{"name":"f"}\n' > package.json \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+  assert_exit "no build script — exit 2" "2" "$(run_in_fixture "$TMP/df-nobuild" check-dist-fresh)"
+
+  # D3. Build script but NO committed dist — UNVERIFIED, emphatically not 0.
+  # This is the cell that would let a staleness gate run green forever.
+  mkdir -p "$TMP/df-nodist"
+  ( cd "$TMP/df-nodist" && git init -q \
+      && printf '{"name":"f","scripts":{"build":"true"}}\n' > package.json \
+      && git add -A && git -c user.email=t@t -c user.name=t commit -qm i )
+  assert_exit "no committed dist — exit 2" "2" "$(run_in_fixture "$TMP/df-nodist" check-dist-fresh)"
+
+  # D4. A ref that does not exist — UNVERIFIED, not a pass.
+  assert_exit "missing ref — exit 2" "2" "$(run_in_fixture "$TMP/df-nodist" check-dist-fresh --ref v9.9.9)"
+
+  # D5. --root pointing nowhere — UNVERIFIED.
+  assert_exit "--root nonexistent — exit 2" "2" "$(run_in_fixture "$TMP/df-nodist" check-dist-fresh --root /nonexistent-df)"
+
   printf '\nTotal: %d passed, %d failed\n' "$PASS" "$FAIL"
   if [ "$FAIL" -gt 0 ]; then
     exit 1

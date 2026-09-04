@@ -10,6 +10,7 @@
 //   schema-change-reminder  — pre-commit advisory: prisma/schema.prisma staged → reminder to verify
 //   check-stale-pins        — pre-push gate: rejects @rello-platform/* pins >= 2 minors behind latest tag
 //   check-lockfile-ssh      — gate: rejects git+ssh resolved entries in package-lock.json (--fix rewrites)
+//   check-dist-fresh        — gate: committed dist/ must byte-match a fresh build of src/ (tag-consumable artifact)
 //
 // Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
 // criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
@@ -33,6 +34,19 @@
 // v0.5.0 — adds check-lockfile-ssh (Railway-unfetchable git+ssh lockfile guard,
 //          also run by check-stale-pins so consumers inherit it pin-bump-only)
 //          per DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610.
+// v0.7.0 — adds check-dist-fresh: asserts a package's COMMITTED dist/ is
+//          byte-identical to a fresh build of its own src/. The platform
+//          installs from GIT TAGS, so the artifact a consumer receives is
+//          whatever dist/ was committed at that tag — and nothing verified that
+//          the committed output came from the committed input. A tag can carry
+//          src/ from one commit and dist/ from an older one, and every consumer
+//          installs the stale output with no signal at install, build or
+//          runtime (the consumer's tsc typechecks fine, because the stale
+//          .d.ts is that artifact's own honest self-description).
+//          Builds TWICE and compares the two fresh builds to each other first:
+//          a non-deterministic toolchain is UNVERIFIED, never a pass and never
+//          STALE. Measured 2026-09-04: tsc and tsup are both byte-stable across
+//          absolute paths, so no normalisation is needed today.
 // Backward-compatible: defaults preserve v0.1.0 + v0.2.0 behavior on every input.
 
 "use strict";
@@ -50,6 +64,7 @@ const SUBCOMMANDS = {
   "check-stale-pins": "check-stale-pins.sh",
   "check-lockfile-ssh": "check-lockfile-ssh.sh",
   "verify-sql-objects": "verify-sql-objects.mjs",
+  "check-dist-fresh": "check-dist-fresh.mjs",
 };
 
 // Most subcommands are bash. verify-sql-objects is a Node ESM parser (it walks
@@ -62,7 +77,13 @@ const runnerFor = (scriptName) =>
 
 // Subcommands that accept --root <path>. `db-apply-sql` uses positional args
 // per PA-049's locked contract, so it is excluded.
-const ROOT_AWARE = new Set(["floating-refs", "roles", "check-stale-pins", "check-lockfile-ssh"]);
+const ROOT_AWARE = new Set([
+  "floating-refs",
+  "roles",
+  "check-stale-pins",
+  "check-lockfile-ssh",
+  "check-dist-fresh",
+]);
 
 const args = process.argv.slice(2);
 const subcommand = args[0];
@@ -79,6 +100,8 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  schema-change-reminder                        Pre-commit: remind to verify when prisma/schema.prisma staged\n" +
     "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
     "  check-lockfile-ssh [--root <dir>] [--fix]     Gate: reject git+ssh resolved entries in package-lock.json\n" +
+    "  check-dist-fresh [--root <dir>] [--ref <r>]   Gate: committed dist/ must reproduce byte-identically from src/\n" +
+    "                                                (exit 1 = STALE, 2 = UNVERIFIED and never a pass)\n" +
     "  verify-sql-objects [--url <conn>]             Gate: assert every prisma/sql-declared object EXISTS in the DB\n" +
     "                     [--sql-dir <dir>]          (exit 1 = missing, 2 = UNVERIFIED and never a pass)\n" +
     "                                                (--fix rewrites github.com entries to git+https, sha preserved)\n" +
