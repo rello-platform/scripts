@@ -135,8 +135,46 @@ function git(root, args) {
   return execFileSync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 });
 }
 
-function fail(msg, code = EXIT_UNVERIFIED) {
-  process.stderr.write(`${msg}\n`);
+/**
+ * Machine-readable UNVERIFIED reasons.
+ *
+ * `tag-dist-gate` needs to tell the two EXEMPTABLE conditions ("this package
+ * legitimately has no build step / no committed dist") apart from the ones that
+ * must always block ("the build failed", "the output is not reproducible").
+ * A single opaque exit 2 would force an exemption to cover all of them, which
+ * is how an exemption written for a benign reason ends up hiding a real one.
+ */
+export const UNVERIFIED_REASONS = {
+  NO_BUILD_SCRIPT: "no-build-script",
+  NO_COMMITTED_DIST: "no-committed-dist",
+  NOT_A_GIT_TREE: "not-a-git-tree",
+  NO_PACKAGE_JSON: "no-package-json",
+  REF_NOT_FOUND: "ref-not-found",
+  ROOT_MISSING: "root-missing",
+  EXPORT_FAILED: "export-failed",
+  INSTALL_FAILED: "install-failed",
+  BUILD_FAILED: "build-failed",
+  NON_DETERMINISTIC: "non-deterministic",
+  BAD_ARGUMENT: "bad-argument",
+  INTERNAL: "internal",
+};
+
+/** The only two an exemption may ever cover. Everything else always blocks. */
+export const EXEMPTABLE_REASONS = new Set([
+  UNVERIFIED_REASONS.NO_BUILD_SCRIPT,
+  UNVERIFIED_REASONS.NO_COMMITTED_DIST,
+]);
+
+let JSON_MODE = false;
+
+function fail(msg, reason = UNVERIFIED_REASONS.INTERNAL, code = EXIT_UNVERIFIED) {
+  if (JSON_MODE) {
+    process.stdout.write(
+      JSON.stringify({ verdict: "UNVERIFIED", reason, message: msg }, null, 2) + "\n",
+    );
+  } else {
+    process.stderr.write(`${msg}\n`);
+  }
   process.exit(code);
 }
 
@@ -151,7 +189,7 @@ function parseArgs(argv) {
     else if (a === "--json") opts.json = true;
     else if (a === "--keep-temp") opts.keepTemp = true;
     else if (a === "--help" || a === "-h") opts.help = true;
-    else fail(`UNVERIFIED: unknown argument '${a}'.`);
+    else fail(`UNVERIFIED: unknown argument '${a}'.`, UNVERIFIED_REASONS.BAD_ARGUMENT);
   }
   return opts;
 }
@@ -166,24 +204,28 @@ function main() {
     process.exit(0);
   }
 
+  JSON_MODE = opts.json;
   const root = path.resolve(process.cwd(), opts.root);
-  if (!fs.existsSync(root)) fail(`UNVERIFIED: --root does not exist: ${opts.root}`);
+  if (!fs.existsSync(root)) fail(`UNVERIFIED: --root does not exist: ${opts.root}`, UNVERIFIED_REASONS.ROOT_MISSING);
 
   // git is load-bearing: it defines "tracked", which is what a tag carries.
   try {
     git(root, ["rev-parse", "--is-inside-work-tree"]);
   } catch {
-    fail(`UNVERIFIED: not a git work tree: ${root}`);
+    fail(`UNVERIFIED: not a git work tree: ${root}`, UNVERIFIED_REASONS.NOT_A_GIT_TREE);
   }
 
   const pkgPath = path.join(root, "package.json");
-  if (!fs.existsSync(pkgPath)) fail(`UNVERIFIED: no package.json at ${root}`);
+  if (!fs.existsSync(pkgPath)) fail(`UNVERIFIED: no package.json at ${root}`, UNVERIFIED_REASONS.NO_PACKAGE_JSON);
   const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
   const buildScript = pkg.scripts?.build;
   const label = `${pkg.name ?? path.basename(root)}@${pkg.version ?? "?"}`;
 
   if (!buildScript) {
-    fail(`UNVERIFIED: ${label} has no "scripts.build" — nothing to reproduce from.`);
+    fail(
+      `UNVERIFIED: ${label} has no "scripts.build" — nothing to reproduce from.`,
+      UNVERIFIED_REASONS.NO_BUILD_SCRIPT,
+    );
   }
 
   const ref = opts.ref;
@@ -192,7 +234,7 @@ function main() {
     try {
       git(root, ["rev-parse", "--verify", `${ref}^{commit}`]);
     } catch {
-      fail(`UNVERIFIED: ref not found: ${ref}`);
+      fail(`UNVERIFIED: ref not found: ${ref}`, UNVERIFIED_REASONS.REF_NOT_FOUND);
     }
   }
 
@@ -212,6 +254,7 @@ function main() {
       `UNVERIFIED: ${label} has no committed dist/ at ${treeish} — nothing to compare.\n` +
         `  If this package deliberately builds on install (npm 'prepare'), it is out of scope for this check.\n` +
         `  This is NOT a pass: a missing dist is exactly as unverified as a stale one.`,
+      UNVERIFIED_REASONS.NO_COMMITTED_DIST,
     );
   }
 
@@ -231,7 +274,10 @@ function main() {
     );
     if (archive.status !== 0) {
       cleanup();
-      fail(`UNVERIFIED: could not export ${treeish}: ${(archive.stderr || "").trim()}`);
+      fail(
+        `UNVERIFIED: could not export ${treeish}: ${(archive.stderr || "").trim()}`,
+        UNVERIFIED_REASONS.EXPORT_FAILED,
+      );
     }
 
     // The committed dist, straight out of git.
@@ -255,6 +301,7 @@ function main() {
       fail(
         `UNVERIFIED: dependency install failed for ${label} — cannot build, so cannot compare.\n` +
           `  ${(install.stderr || "").trim().split("\n").slice(-3).join("\n  ")}`,
+        UNVERIFIED_REASONS.INSTALL_FAILED,
       );
     }
 
@@ -267,6 +314,7 @@ function main() {
         fail(
           `UNVERIFIED: build failed for ${label} (attempt ${attempt}) — cannot compare.\n` +
             `  ${(built.stderr || built.stdout || "").trim().split("\n").slice(-5).join("\n  ")}`,
+          UNVERIFIED_REASONS.BUILD_FAILED,
         );
       }
       builds.push(hashTree(path.join(srcDir, "dist")));
@@ -288,6 +336,7 @@ function main() {
       builtFiles: builds[0].size,
       deterministic,
       verdict: code === EXIT_FRESH ? "FRESH" : code === EXIT_STALE ? "STALE" : "UNVERIFIED",
+      reason: code === EXIT_UNVERIFIED ? UNVERIFIED_REASONS.NON_DETERMINISTIC : null,
       missing: distDiff.missing,
       extra: distDiff.extra,
       changed: distDiff.changed,
@@ -326,7 +375,7 @@ function main() {
     process.exit(code);
   } catch (err) {
     cleanup();
-    fail(`UNVERIFIED: ${err instanceof Error ? err.message : String(err)}`);
+    fail(`UNVERIFIED: ${err instanceof Error ? err.message : String(err)}`, UNVERIFIED_REASONS.INTERNAL);
   }
 }
 

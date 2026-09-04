@@ -11,6 +11,7 @@
 //   check-stale-pins        — pre-push gate: rejects @rello-platform/* pins >= 2 minors behind latest tag
 //   check-lockfile-ssh      — gate: rejects git+ssh resolved entries in package-lock.json (--fix rewrites)
 //   check-dist-fresh        — gate: committed dist/ must byte-match a fresh build of src/ (tag-consumable artifact)
+//   tag-dist-gate           — pre-push hook: refuses a v* tag carrying a stale/unverifiable dist/ (branch pushes untouched)
 //
 // Behavior parity with the pre-cutover .sh siblings is the explicit acceptance
 // criterion (PA-053 Phase 2.A). Each subcommand spawns the bundled .sh script
@@ -65,6 +66,7 @@ const SUBCOMMANDS = {
   "check-lockfile-ssh": "check-lockfile-ssh.sh",
   "verify-sql-objects": "verify-sql-objects.mjs",
   "check-dist-fresh": "check-dist-fresh.mjs",
+  "tag-dist-gate": "tag-dist-gate.mjs",
 };
 
 // Most subcommands are bash. verify-sql-objects is a Node ESM parser (it walks
@@ -101,6 +103,8 @@ if (!subcommand || subcommand === "--help" || subcommand === "-h") {
     "  check-stale-pins [--root <dir>]               Gate: reject @rello-platform/* pins >= 2 minors behind latest tag\n" +
     "  check-lockfile-ssh [--root <dir>] [--fix]     Gate: reject git+ssh resolved entries in package-lock.json\n" +
     "  check-dist-fresh [--root <dir>] [--ref <r>]   Gate: committed dist/ must reproduce byte-identically from src/\n" +
+    "  tag-dist-gate                                 Pre-push hook: refuse a v* tag whose dist/ is stale/UNVERIFIED\n" +
+    "                                                (reads pre-push stdin; branch pushes pass through untouched)\n" +
     "                                                (exit 1 = STALE, 2 = UNVERIFIED and never a pass)\n" +
     "  verify-sql-objects [--url <conn>]             Gate: assert every prisma/sql-declared object EXISTS in the DB\n" +
     "                     [--sql-dir <dir>]          (exit 1 = missing, 2 = UNVERIFIED and never a pass)\n" +

@@ -382,3 +382,67 @@ URL resolution order: `DIRECT_URL`, `DIRECT_DATABASE_URL`, `DATABASE_URL` —
 read from the consumer's `.env` in Node (never shell-sourced, so a malformed
 line cannot abort a caller running under `set -e`), with real environment
 variables taking precedence.
+
+## check-dist-fresh / tag-dist-gate — committed `dist/` must reproduce from committed `src/`
+
+The platform installs packages from **git tags**, so the artifact a consumer
+receives is whatever `dist/` was committed at that tag. Nothing verified that
+the committed output came from the committed input: a tag can carry `src/` from
+one commit and `dist/` from an older one, and every consumer installs the stale
+output with no signal at install, build or runtime — the consumer's `tsc`
+typechecks happily, because the stale `.d.ts` is that artifact's own honest
+self-description.
+
+`check-dist-fresh` exports the tree at a ref, builds it **twice**, compares the
+two fresh builds to each other (a non-deterministic toolchain is UNVERIFIED, not
+a pass), then compares against the committed `dist/` read out of git.
+
+`tag-dist-gate` is the pre-push hook wrapper: it reads git's ref list on stdin
+and fires **only** when a `refs/tags/v*` is being pushed. Ordinary branch pushes
+pass through untouched — gating every push would add an install+build×2 to
+routine work, which is how a hook gets `--no-verify`d within a week.
+
+**Exit codes: `0` FRESH, `1` STALE, `2` UNVERIFIED.** Callers must require
+exit 0. Per `unknown-is-not-absent.md` §the exit-code corollary, testing `!= 1`
+reads UNVERIFIED as a pass.
+
+**Exemptions** live in `.dist-fresh-exempt` at a repo root as
+`<package-name>: <written reason>`. Both halves are required. The exemption is
+narrow by construction — it covers only `no-build-script` and
+`no-committed-dist`, never STALE and never a failed or unreproducible build, so
+an exemption written for a benign reason cannot hide a real one.
+
+### Why we still commit `dist/` — measured 2026-09-04, do not re-run this
+
+The structurally stronger design is to stop committing `dist/` and let npm's
+`prepare` lifecycle build on install: a dist that does not exist cannot be
+stale. It was evaluated and **rejected on cost, not on failure** — record kept
+here so the next person does not repeat the experiment.
+
+It *works*. Contrary to what `nixpacks.toml` and Rello's CLAUDE.md imply, the
+documented npm 10.9.2 `"git dep preparation failed" / edgesOut` crash could not
+be reproduced for `prepare` at all. Six cells, all exit 0, using the Trigger.dev
+image's exact command (`npm i --no-audit --no-fund --no-save --no-package-lock`)
+with `GIT_CONFIG_GLOBAL/SYSTEM=/dev/null` (this platform's dev machines carry an
+`insteadOf` rewrite that silently masks any URL-level test):
+
+| npm | variant | result |
+|---|---|---|
+| 11.12.1 / 10.9.2 | dist committed, no prepare | exit 0 |
+| 11.12.1 / 10.9.2 | no dist, `prepare` builds | exit 0, dist present |
+| 10.9.2 | nested **git** devDependency, cold cache | exit 0, built in 6s |
+
+That crash is a property of Rello's full 33-git-dep graph, not of `prepare`.
+
+**The cost is why we did not adopt it.** Under `prepare`, every consumer must
+install each package's devDependencies to build it. `rello-ui` carries 23
+devDependencies including the whole Storybook toolchain; **one cold install
+pulled 755 MB of npm cache**. That moves Storybook, Vite and Tailwind into every
+consumer's build image, on every cold build, to produce something no consumer
+needs at runtime — and makes each consumer's install newly dependent on the
+transitive health of all of it, inside images this platform has repeatedly
+documented as fragile. Four of nine packages also devDepend on another git
+package, which makes git-dep preparation recursive.
+
+Committing `dist/` plus a gate on the tag keeps that cost at zero and moves the
+failure to the one moment someone is already paying attention.

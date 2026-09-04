@@ -127,5 +127,91 @@ t("no outcome value is reachable by testing `!== 1`", () => {
   assert.equal(codes.size, 3);
 });
 
+
+
+// ── tag-dist-gate: stdin parsing + exemption narrowness ─────────────────────
+
+const gate = await import("../scripts/tag-dist-gate.mjs");
+
+process.stdout.write("\ntag-dist-gate — stdin + exemptions\n");
+
+t("an ordinary branch push yields NO tags (hook must pass through)", () => {
+  const refs = gate.parseTagRefs("refs/heads/main aaa refs/heads/main bbb\n");
+  assert.deepEqual(refs, []);
+});
+
+t("a v* tag push is detected", () => {
+  const refs = gate.parseTagRefs("refs/tags/v1.2.3 abc refs/tags/v1.2.3 000\n");
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].tag, "v1.2.3");
+});
+
+t("a NON-v tag is ignored — releases are what v* means here", () => {
+  assert.deepEqual(gate.parseTagRefs("refs/tags/nightly a refs/tags/nightly b\n"), []);
+});
+
+t("a tag DELETION is not gated (nothing to verify)", () => {
+  const zero = "0".repeat(40);
+  assert.deepEqual(gate.parseTagRefs(`refs/tags/v1.0.0 ${zero} refs/tags/v1.0.0 abc\n`), []);
+});
+
+t("a mixed push gates only the tag", () => {
+  const refs = gate.parseTagRefs(
+    "refs/heads/main a refs/heads/main b\nrefs/tags/v2.0.0 c refs/tags/v2.0.0 d\n",
+  );
+  assert.equal(refs.length, 1);
+  assert.equal(refs[0].tag, "v2.0.0");
+});
+
+t("garbage stdin yields no tags rather than throwing", () => {
+  assert.deepEqual(gate.parseTagRefs("nonsense\n\n"), []);
+  assert.deepEqual(gate.parseTagRefs(null), []);
+});
+
+t("an exemption REQUIRES a written reason", () => {
+  const { entries, errors } = gate.parseExemptions("@scope/pkg:\n");
+  assert.equal(entries.size, 0);
+  assert.match(errors[0], /no written reason/);
+});
+
+t("a well-formed exemption parses, comments ignored", () => {
+  const { entries, errors } = gate.parseExemptions("# note\n@scope/pkg: ships types only, no build\n");
+  assert.deepEqual(errors, []);
+  assert.equal(entries.get("@scope/pkg"), "ships types only, no build");
+});
+
+t("an exemption covers no-build-script and no-committed-dist ONLY", () => {
+  const exemptions = new Map([["p", "why"]]);
+  for (const reason of ["no-build-script", "no-committed-dist"]) {
+    assert.equal(gate.isExempt({ verdict: "UNVERIFIED", reason, packageName: "p", exemptions }), true);
+  }
+});
+
+t("🔴 an exemption NEVER covers STALE", () => {
+  // The whole risk of an exemption list: one written for a benign reason
+  // silently covering a real failure.
+  const exemptions = new Map([["p", "why"]]);
+  assert.equal(gate.isExempt({ verdict: "STALE", reason: null, packageName: "p", exemptions }), false);
+});
+
+t("🔴 an exemption NEVER covers a failed or unreproducible build", () => {
+  const exemptions = new Map([["p", "why"]]);
+  for (const reason of ["build-failed", "install-failed", "non-deterministic", "export-failed"]) {
+    assert.equal(
+      gate.isExempt({ verdict: "UNVERIFIED", reason, packageName: "p", exemptions }),
+      false,
+      `${reason} must not be exemptable`,
+    );
+  }
+});
+
+t("an exemption for a DIFFERENT package does not apply", () => {
+  const exemptions = new Map([["other", "why"]]);
+  assert.equal(
+    gate.isExempt({ verdict: "UNVERIFIED", reason: "no-build-script", packageName: "p", exemptions }),
+    false,
+  );
+});
+
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);
