@@ -5,3 +5,19 @@
 # No-prepare install (git-dep-safe, matches existing .husky/pre-commit precedent).
 # Enable once per clone:  git config core.hooksPath .husky
 npm test
+
+# ── lockfile git+ssh gate ────────────────────────────────────────────────────
+# WHY THIS IS WIRED DIRECTLY. The shared implementation has existed since
+# scripts v0.5.0, but it rides `check-stale-pins` — and no package repo invokes
+# that. Five package repos therefore inherited a lockfile gate from a check none
+# of them ran, which is why 18 committed `git+ssh://git@github.com/...` resolved
+# entries reached origin/main across five of them and survived.
+#
+# A machine-level `url.https://github.com/.insteadOf git+ssh://git@github.com/`
+# rewrite produced them AND masked them: they fetched fine locally and could
+# only ever have resolved on Railway from cache. That rewrite has been removed,
+# so the local result now matches the build image.
+#
+# Requires exit 0. Offenders (exit 1) block; an unparseable lockfile (exit 2)
+# blocks too — "could not tell" is not "fine". No `|| true`.
+npx --yes "github:rello-platform/scripts#v0.10.0" check-lockfile-ssh
