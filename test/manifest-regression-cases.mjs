@@ -19,6 +19,7 @@ import {
   newestVersionTag,
 } from "../scripts/check-manifest-regression.mjs";
 import { scanSource, importedCtorNames } from "../scripts/check-explicit-apikey.mjs";
+import { priorVersionTag } from "../scripts/tag-dist-gate.mjs";
 
 /**
  * Every construction site the scanner counts must be bound to the package.
@@ -288,6 +289,32 @@ t("a multi-line import clause is resolved — every real file uses that form", (
   ].join("\n");
   assert.deepEqual(importedCtorNames(src), ["createSharedClient"]);
   assert.equal(scanSource("a.ts", src).length, 1);
+});
+
+process.stdout.write("\ntag-dist-gate — manifest baseline selection\n");
+
+t("🔴 THE INERT-GATE TRAP: the tag being pushed is never its own baseline", () => {
+  // At pre-push the tag ALREADY exists locally. A baseline of "newest v* tag"
+  // would compare the manifest to itself, pass unconditionally, and print green
+  // forever — a gate that runs and cannot fail.
+  assert.equal(priorVersionTag(".", "v0.9.0", ["v0.7.0", "v0.8.0", "v0.9.0"]), "v0.8.0");
+});
+
+t("baseline is the newest tag strictly below, not merely the previous one", () => {
+  assert.equal(priorVersionTag(".", "v2.26.0", ["v2.9.0", "v2.25.0", "v2.10.0"]), "v2.25.0");
+});
+
+t("a first release has no baseline — no constraint, not 'could not tell'", () => {
+  assert.equal(priorVersionTag(".", "v1.0.0", []), null);
+  assert.equal(priorVersionTag(".", "v1.0.0", ["v1.0.0"]), null);
+});
+
+t("a tag below every existing one has no baseline", () => {
+  assert.equal(priorVersionTag(".", "v0.1.0", ["v0.7.0", "v0.8.0"]), null);
+});
+
+t("a non-semver tag yields no baseline rather than a wrong one", () => {
+  assert.equal(priorVersionTag(".", "nightly", ["v1.0.0"]), null);
 });
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);

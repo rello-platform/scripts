@@ -56,6 +56,7 @@ import { fileURLToPath } from "node:url";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const CHECKER = path.join(HERE, "check-dist-fresh.mjs");
+const MANIFEST_CHECKER = path.join(HERE, "check-manifest-regression.mjs");
 const EXEMPT_FILE = ".dist-fresh-exempt";
 
 /**
@@ -117,6 +118,40 @@ export function isExempt({ verdict, reason, packageName, exemptions }) {
   if (verdict !== "UNVERIFIED") return false;
   if (!exemptions.has(packageName)) return false;
   return reason === "no-build-script" || reason === "no-committed-dist";
+}
+
+/**
+ * The newest `v*` tag STRICTLY BELOW `tag`, or null if this is the first.
+ *
+ * Exported for the same reason the parsers are: the trap it exists to avoid —
+ * a baseline that includes the tag being pushed, making the gate inert — is
+ * invisible in a passing run and only catchable by a test.
+ */
+export function priorVersionTag(root, tag, listTags = null) {
+  const tags =
+    listTags ??
+    (() => {
+      const r = spawnSync("git", ["tag", "--list", "v*"], { cwd: root, encoding: "utf8" });
+      return r.status === 0 ? r.stdout.split("\n").filter(Boolean) : [];
+    })();
+  const target = parseV(tag);
+  if (!target) return null;
+  const below = tags
+    .map((t) => ({ tag: t, v: parseV(t) }))
+    .filter((x) => x.v && cmpV(x.v, target) < 0);
+  if (below.length === 0) return null;
+  below.sort((a, b) => cmpV(b.v, a.v));
+  return below[0].tag;
+}
+
+function parseV(t) {
+  const m = /^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/.exec(String(t).trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null;
+}
+
+function cmpV(a, b) {
+  for (let i = 0; i < 3; i++) if (a[i] !== b[i]) return a[i] < b[i] ? -1 : 1;
+  return 0;
 }
 
 function main() {
@@ -204,6 +239,63 @@ function main() {
           `  unreproducible build.\n\n`,
       );
     }
+  }
+
+  // ── Second gate: the manifest must not have gone backwards. ───────────────
+  //
+  // dist/ reproducing from src/ says NOTHING about this. The 2026-09-04
+  // regression (api-client 2.25.0 -> 2.23.0, dual ESM/CJS exports map lost)
+  // passed the dist check honestly — both trees were internally correct, and
+  // the file deciding which of them a consumer resolves had gone stale
+  // underneath. Two questions, two checks.
+  for (const { tag } of tags) {
+    const baseline = priorVersionTag(root, tag);
+
+    // ⚑ THE INERT-GATE TRAP. At pre-push the tag being pushed ALREADY EXISTS
+    // locally, so letting the checker pick "the newest v* tag" would compare
+    // the manifest to itself and pass unconditionally — a gate that runs,
+    // prints green, and cannot fail. The baseline is always the newest tag
+    // STRICTLY BELOW the one being pushed.
+    if (!baseline) {
+      // A first release has nothing to regress FROM. That is genuinely "no
+      // constraint", not "could not tell", and the gate verified it by listing
+      // the repo's tags itself. Stated out loud rather than skipped silently.
+      process.stdout.write(
+        `[tag-dist-gate]   ~ ${tag}: first v* tag — no prior manifest to regress from.\n`,
+      );
+      continue;
+    }
+
+    process.stdout.write(`[tag-dist-gate] verifying manifest at ${tag} vs ${baseline} …\n`);
+    const mres = spawnSync(
+      process.execPath,
+      [MANIFEST_CHECKER, "--root", root, "--against", baseline, "--json"],
+      { encoding: "utf8" },
+    );
+
+    if (mres.status === 0) {
+      process.stdout.write(`[tag-dist-gate]   ✓ ${tag}: manifest is unchanged or wider\n`);
+      continue;
+    }
+
+    // Requires exit 0. REGRESSION blocks; UNVERIFIED blocks too. There is no
+    // exemption for this one — a manifest is not optional the way a build step
+    // is, and every package that can be tagged has one.
+    failed++;
+    let mreport = null;
+    try {
+      mreport = JSON.parse(mres.stdout || "{}");
+    } catch {
+      mreport = null;
+    }
+    const kind = mres.status === 1 ? "REGRESSED" : "UNVERIFIED";
+    process.stderr.write(
+      `\n[tag-dist-gate] ✗ ${tag} — manifest ${kind} against ${baseline}.\n` +
+        (mreport?.problems ?? []).map((pr) => `      ${pr.kind}: ${pr.detail}\n`).join("") +
+        (mreport?.problems?.length ? "" : `  ${(mres.stderr || "").trim().split("\n").slice(0, 6).join("\n  ")}\n`) +
+        `\n  A consumer resolves this manifest, not the source. The dist/ check above is\n` +
+        `  green and correct — it answers a different question.\n\n`,
+    );
   }
 
   if (failed > 0) {
