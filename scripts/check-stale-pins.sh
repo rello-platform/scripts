@@ -71,6 +71,7 @@ set -uo pipefail
 PKG=""
 ROOT=""
 POSITIONAL=()
+WRITE_BASELINE=0
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -84,6 +85,13 @@ while [ "$#" -gt 0 ]; do
       ;;
     --root=*)
       ROOT="${1#--root=}"
+      shift
+      ;;
+    --write-baseline)
+      # Consumed here so it is not mistaken for the package.json path, and the
+      # flag is recorded HERE rather than re-read from "$*" later — by the time
+      # section 3b runs, this loop has already shifted it away.
+      WRITE_BASELINE=1
       shift
       ;;
     *)
@@ -350,6 +358,48 @@ classify_tag() {
 # ---------------------------------------------------------------------------
 # 4. Walk each dep, classify, aggregate.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# 3b. GRANDFATHER BASELINE (v0.14.0)
+#
+# ⚑ WHY THIS EXISTS, MEASURED. Switching the axis from version-distance to age
+# is correct, and arming it cold is an outage. Measured across 15 repos on
+# 2026-09-04: 70 pins are behind latest, median age 88 DAYS, p90 108d, max 138d.
+# A 30-day FAIL threshold would have blocked 56 of those 70 — every spoke at
+# once. That is not a gate, it is a stop-work order, and a gate that stops all
+# work gets deleted or --no-verify'd within a day.
+#
+# So the threshold is ARMED FOR NET-NEW staleness against a recorded baseline,
+# the same shape as the platform's other armed gates. A pin listed in
+# .stale-pin-baseline.json AT THE SAME VERSION is pre-existing debt: it WARNs
+# loudly with its age and does not block. Anything else crossing the threshold
+# FAILs immediately — including a baselined pin that is later BUMPED and then
+# allowed to go stale again, because the recorded version no longer matches.
+#
+# This forgives nothing. The debt is written down, dated, visible on every push,
+# and can only shrink: removing an entry is the only way to make it quieter.
+#
+#   rello-scripts check-stale-pins --write-baseline   # arm, once, per repo
+# ---------------------------------------------------------------------------
+BASELINE_FILE=".stale-pin-baseline.json"
+# WRITE_BASELINE is set by the argument loop above; default it only if unset.
+: "${WRITE_BASELINE:=0}"
+
+baseline_version_for() {
+  # echoes the baselined version for a package key, or "" if not baselined
+  local key="$1"
+  [ -f "$BASELINE_FILE" ] || { echo ""; return 0; }
+  node -e '
+    const fs = require("fs");
+    try {
+      const b = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const e = (b.pins || {})[process.argv[2]];
+      process.stdout.write(e && e.version ? String(e.version) : "");
+    } catch { process.stdout.write(""); }
+  ' "$BASELINE_FILE" "$key"
+}
+
+declare -a BASELINE_ROWS=()
+
 HAS_FAIL=0
 declare -a REPORT=()
 
@@ -420,7 +470,16 @@ while IFS=$'\t' read -r tag key val; do
     case "$status" in
       OK)   REPORT+=("OK    $key  -> $msg");;
       WARN) REPORT+=("WARN  $key  -> $msg");;
-      FAIL) REPORT+=("FAIL  $key  -> $msg"); HAS_FAIL=1;;
+      FAIL)
+        bv="$(baseline_version_for "$key")"
+        if [ -n "$bv" ] && [ "$bv" = "$pinnedver" ]; then
+          # Pre-existing debt, recorded and dated. Loud, not blocking.
+          REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]")
+        else
+          REPORT+=("FAIL  $key  -> $msg"); HAS_FAIL=1
+        fi
+        BASELINE_ROWS+=("$key|$pinnedver")
+        ;;
       UNKNOWN) REPORT+=("UNKN  $key  -> $msg");;
       *)    REPORT+=("WARN  $key  -> $msg");;
     esac
@@ -502,6 +561,41 @@ if [ -f "$LOCKFILE" ]; then
     LOCK_SSH_FAIL=1
     HAS_FAIL=1
   fi
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. --write-baseline: record today's over-threshold pins, once, per repo.
+#
+# Writes only what is CURRENTLY over the threshold, with the age at recording
+# and the date. It never records a healthy pin, so arming cannot silently widen
+# the exemption, and the file is a debt ledger a reader can diff over time.
+# ---------------------------------------------------------------------------
+if [ "$WRITE_BASELINE" -eq 1 ]; then
+  node -e '
+    const fs = require("fs");
+    // ⚑ slice(1), NOT slice(2). Under `node -e`, argv[0] is the node binary and
+    // argv[1] is the FIRST user argument — there is no script path to skip.
+    // slice(2) silently dropped exactly one entry, which is invisible unless
+    // you count: arming reported 2 pins where 3 had been collected.
+    const rows = process.argv.slice(1).filter(Boolean);
+    const pins = {};
+    for (const r of rows) {
+      const [key, version] = r.split("|");
+      if (key && version) pins[key] = { version, recordedAt: new Date().toISOString().slice(0, 10) };
+    }
+    const out = {
+      _comment:
+        "Pre-existing stale pins, recorded when check-stale-pins was armed on the AGE axis. " +
+        "Each entry WARNs on every push and does not block. Bumping the pin makes the entry " +
+        "stale and it should be deleted; a baselined pin that is bumped and then allowed to go " +
+        "stale again FAILS, because the recorded version no longer matches. This file can only " +
+        "shrink.",
+      pins,
+    };
+    fs.writeFileSync(".stale-pin-baseline.json", JSON.stringify(out, null, 2) + "\n");
+    process.stdout.write("wrote .stale-pin-baseline.json with " + Object.keys(pins).length + " pre-existing stale pin(s)\n");
+  ' -- "${BASELINE_ROWS[@]}"
+  exit 0
 fi
 
 # ---------------------------------------------------------------------------

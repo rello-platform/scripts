@@ -503,6 +503,36 @@ JSON
   assert_exit "raising the fail threshold past the age clears it — exit 0" "0" \
     "$(cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PIN_FAIL_DAYS=365 RELLO_STALE_PIN_WARN_DAYS=300 "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
 
+  # C3d. 🔴 ARMING: a recorded baseline turns pre-existing debt into DEBT, not
+  # FAIL — and the repo becomes pushable. Measured 2026-09-04 across 15 repos:
+  # 70 pins are behind, median age 88d, max 138d, and a cold 30d threshold would
+  # have blocked 56 of them. That is a stop-work order, not a gate.
+  cp -R "$TMP/csp-fail" "$TMP/csp-baseline"
+  ( cd "$TMP/csp-baseline" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins --write-baseline >/dev/null 2>&1 )
+  assert_exit "baselined pre-existing debt does not block — exit 0" "0" "$(csp_run "$TMP/csp-baseline")"
+
+  # C3e. 🟢 CONTROL: the baseline forgives NOTHING. A baselined pin recorded at
+  # a DIFFERENT version — bumped once, then allowed to go stale again — fails.
+  ( cd "$TMP/csp-baseline" && node -e '
+      const fs = require("fs");
+      const b = JSON.parse(fs.readFileSync(".stale-pin-baseline.json", "utf8"));
+      for (const k of Object.keys(b.pins)) b.pins[k].version = "9.9.9";
+      fs.writeFileSync(".stale-pin-baseline.json", JSON.stringify(b, null, 2));
+    ' )
+  assert_exit "baseline recorded at another version still FAILs — exit 1" "1" "$(csp_run "$TMP/csp-baseline")"
+
+  # C3f. 🟢 CONTROL: arming records ONLY what is over the threshold. A healthy
+  # repo writes an empty ledger, so arming can never silently widen the
+  # exemption to pins that were fine.
+  cp -R "$TMP/csp-ok" "$TMP/csp-baseline-clean"
+  ( cd "$TMP/csp-baseline-clean" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins --write-baseline >/dev/null 2>&1 )
+  csp_bl_n="$( node -e '
+      const fs=require("fs");
+      try { process.stdout.write(String(Object.keys(JSON.parse(fs.readFileSync(process.argv[1],"utf8")).pins).length)); }
+      catch { process.stdout.write("0"); }
+    ' "$TMP/csp-baseline-clean/.stale-pin-baseline.json" )"
+  assert_exit "arming a healthy repo records zero pins" "0" "$([ "$csp_bl_n" = "0" ] && echo 0 || echo 1)"
+
   # C4. full major behind — FAIL, exit 1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
   assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"
