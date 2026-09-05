@@ -273,7 +273,20 @@ else
   printf '\nFix: npx rello-scripts check-lockfile-ssh --fix   (rewrites github.com entries\n' >&2
   printf 'to git+https://github.com/<org>/<repo>.git#<sha>, sha preserved), then commit\n' >&2
   printf 'the lockfile. Keep the github: shortcut in package.json — only the lockfile\n' >&2
-  printf 'resolved field flips. Spec: DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-\n' >&2
-  printf 'RAILWAY-CACHE-LUCK-260610 (AMENDED).\n' >&2
+  printf 'resolved field flips.\n' >&2
+  printf '\n' >&2
+  printf '  DO NOT run: git checkout origin/main -- package-lock.json\n' >&2
+  printf '  That is the natural reflex when a lockfile looks wrong, and it silently UNDOES\n' >&2
+  printf '  the version bump you just made — main\47s lockfile still resolves the OLD\n' >&2
+  printf '  version, so you lose the upgrade AND stay blocked. Measured 2026-09-05: an\n' >&2
+  printf '  agent nearly took it, and only avoided it by reading the committed lockfile\n' >&2
+  printf '  rather than the diffstat, where the revert looks like a tidy-up.\n' >&2
+  printf '  --fix heals in place and KEEPS the new version. That is the whole difference.\n' >&2
+  printf '\n' >&2
+  printf '  Expect this after EVERY npm install touching a git dep: npm re-stamps ssh for\n' >&2
+  printf '  github: shorthand on its own. This gate re-fails and --fix re-heals; that loop\n' >&2
+  printf '  is the design, not a fault.\n' >&2
+  printf '\n' >&2
+  printf 'Spec: DISCOVERED-PLATFORM-GITHUB-PIN-SSH-LOCKFILE-RAILWAY-CACHE-LUCK-260610 (AMENDED).\n' >&2
 fi
 exit 1

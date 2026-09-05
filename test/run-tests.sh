@@ -553,6 +553,27 @@ JSON
     *)                    assert_exit "summary offers the baseline for pre-existing debt" "0" "1";;
   esac
 
+  # C3h. 🔴 THE OPERATOR-FACING LOCKFILE MESSAGE MUST NAME THE TRAP.
+  # After a pin bump, npm re-stamps git+ssh and the natural reflex is
+  # `git checkout origin/main -- package-lock.json` — which reverts the bump,
+  # because main's lockfile still resolves the OLD version. An agent nearly took
+  # it 2026-09-05. The line a blocked person reads has to name the right ACTION,
+  # not just the right diagnosis.
+  mkdir -p "$TMP/lk-msg"
+  printf '{"name":"t","dependencies":{"@rello-platform/slugs":"github:rello-platform/slugs#v0.6.1"}}\n' > "$TMP/lk-msg/package.json"
+  printf '{"name":"t","lockfileVersion":3,"packages":{"node_modules/@rello-platform/slugs":{"version":"0.6.1","resolved":"git+ssh://git@github.com/rello-platform/slugs.git#abc123"}}}\n' > "$TMP/lk-msg/package-lock.json"
+  lk_msg="$( cd "$TMP/lk-msg" && "$CLI" check-lockfile-ssh 2>&1 || true )"
+  case "$lk_msg" in
+    *"DO NOT run: git checkout origin/main -- package-lock.json"*)
+      assert_exit "lockfile message names the revert trap" "0" "0";;
+    *) assert_exit "lockfile message names the revert trap" "0" "1";;
+  esac
+  case "$lk_msg" in
+    *"--fix heals in place and KEEPS the new version"*)
+      assert_exit "lockfile message names --fix as the remedy" "0" "0";;
+    *) assert_exit "lockfile message names --fix as the remedy" "0" "1";;
+  esac
+
   # C4. full major behind — FAIL, exit 1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
   assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"
