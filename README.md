@@ -495,3 +495,53 @@ same exposure. Separately, **51 sites across the canonical spokes read
 `process.env.RELLO_API_KEY` directly** on hand-rolled fetch paths that never
 construct the package client at all. Removing the fallback in v3.0.0 breaks none
 of them, and fixes none of them either.
+
+## Published `v*` tags are immutable — and what that costs
+
+Every `@rello-platform/*` repo consumed by anything on this platform (34 of 34,
+as of 2026-09-05) carries a GitHub ruleset on `refs/tags/v*`:
+
+| rule | effect |
+|---|---|
+| `update` | blocked — a tag cannot be force-moved |
+| `deletion` | blocked — a tag cannot be removed |
+| creation | **allowed** — releases work normally |
+| bypass actors | **none** — enforced for repository admins too |
+
+This closes a real hole. The platform installs from git tags, so a movable tag
+means the artifact a consumer pinned can change underneath it, and nine repos
+pinning `scripts#vX.Y.Z` meant the gate's own definition was mutable by the
+thing it gates.
+
+### ⚑ The consequence, stated plainly because you will meet it under pressure
+
+**A bad tag cannot be withdrawn. It is superseded by bumping forward, never
+removed or repointed.**
+
+There is deliberately no `creation` rule, so prevention happens *before* the
+push — the pre-push hook, and `publish.yml` on the two repos that publish. Once
+a tag exists on the remote it is permanent. That matters most for the route the
+hooks cannot reach: a tag pushed from an ungated clone, with `--no-verify`, or
+created through the GitHub web UI. `audit-published-tags` detects those, but
+detection is after the fact and the tag stays.
+
+**If you ship a bad tag:**
+
+1. **Do not** try to delete or force-move it. Both are refused, and time spent
+   discovering that is time not spent fixing it.
+2. Fix the defect and cut the **next** version. Consumers move forward.
+3. If the bad tag is already pinned somewhere, bump those consumers — find them
+   with a pin sweep across `package.json` files, not by memory.
+4. Leave the bad tag in place. It is a permanent record that something went
+   wrong, which is strictly better than a hole where a tag used to be.
+
+That trade is deliberate: reversibility of a *published* artifact is worth less
+than the guarantee that a pinned artifact never changes. But it moves the entire
+cost of a mistake to the moment of creation, which is why the pre-push gate
+matters more than it looks.
+
+**Emergency exemption.** If a tag genuinely must be removed — leaked credential,
+licence violation — a repository admin can set the ruleset to `enforcement:
+disabled`, delete the tag, and re-enable. That is a deliberate, auditable, two-
+step act, which is the point. It is not a routine remedy and should never be
+used to tidy up a release mistake.
