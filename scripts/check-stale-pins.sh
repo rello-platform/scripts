@@ -233,6 +233,24 @@ all_tags_for() {
   printf '%s\n' "$tags" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V
 }
 
+# Commit date (ISO-8601) of a tag, or "" when unknown/offline.
+#
+# ⚑ ONLY CALLED FOR PINS THAT ARE ALREADY BEHIND. A pin at or ahead of the
+# latest tag short-circuits to OK without a date lookup, so a package that
+# simply has not shipped lately costs zero extra API calls.
+tag_date_for() {
+  local repo="$1" tag="$2"
+  if [ -n "${RELLO_STALE_PINS_MOCK_DIR:-}" ]; then
+    if gh_offline; then echo ""; return 0; fi
+    local f="$RELLO_STALE_PINS_MOCK_DIR/$repo.tagdate.$tag"
+    [ -f "$f" ] || { echo ""; return 0; }
+    cat "$f"
+  else
+    if gh_offline; then echo ""; return 0; fi
+    gh api "repos/rello-platform/$repo/commits/$tag" --jq '.commit.committer.date' 2>/dev/null || echo ""
+  fi
+}
+
 compare_status() {
   local repo="$1" base="$2" head="$3"
   if [ -n "${RELLO_STALE_PINS_MOCK_DIR:-}" ]; then
@@ -255,6 +273,9 @@ read -r -d '' NODE_CLASSIFY_TAG <<'NODEJS' || true
 const pinned = process.argv[1];          // e.g. "0.38.0"
 const latest = process.argv[2];          // e.g. "v0.41.0" (already newest)
 const tagsRaw = process.argv[3] || "";   // newline-separated vX.Y.Z list (asc)
+const pinnedAgeDays = process.argv[4] ?? "";  // age in whole days, or "" if unknown
+const warnDays = process.argv[5] || "14";
+const failDays = process.argv[6] || "30";
 
 function parse(v) {
   const m = /^v?(\d+)\.(\d+)\.(\d+)$/.exec(v.trim());
@@ -285,27 +306,45 @@ if (p.maj < l.maj) {
   process.exit(0);
 }
 
-// Same major: count distinct tagged minors strictly above the pinned minor.
-const minors = new Set();
-for (const t of tagsRaw.split("\n")) {
-  const pt = parse(t);
-  if (!pt) continue;
-  if (pt.maj === l.maj && pt.min > p.min) minors.add(pt.min);
-}
-const behind = minors.size;
-if (behind === 0) {
-  // Same minor as latest (only patch differences) -> treat as current.
-  process.stdout.write("OK\tcurrent minor (pinned v" + pinned + ", latest " + latest + ")");
-} else if (behind === 1) {
-  process.stdout.write("WARN\t1 minor behind (pinned v" + pinned + ", latest " + latest + ")");
+// ── AGE, NOT VERSION DISTANCE (v0.13.0) ───────────────────────────────────
+//
+// This gate used to fail at >= 2 minors behind. That measured the WRONG THING.
+// On 2026-09-04 @rello-platform/scripts published v0.10.0, v0.11.0 and v0.12.0
+// within a few hours; four repos that had changed in no way — MarketIntel,
+// Harvest-Home, PathfinderPro, Open-House-Hub — went from current to
+// push-blocked, and the same pins were bumped twice in one day. A gate whose
+// threshold is denominated in someone else's release cadence fires hardest on
+// the packages that are most actively maintained, which is exactly backwards.
+//
+// The risk is AGE: a repo running a gate published six weeks ago is genuinely
+// behind. A repo two minors behind a package that shipped three times this
+// morning is not. So the question is "how old is the code you are running",
+// answered in days, and the message says the age because that is the number a
+// reader can act on — "3 minors behind" tells you nothing about the risk.
+//
+// A pin at or ahead of the latest tag never reaches here, so a package that has
+// not published in months does not fail anyone.
+const ageDays = pinnedAgeDays === "" ? null : Number(pinnedAgeDays);
+const warnAt = Number(warnDays);
+const failAt = Number(failDays);
+
+if (ageDays === null || Number.isNaN(ageDays)) {
+  // Could not date the tag. Reported as its own outcome and NOT as OK — but it
+  // does not block, matching the documented offline posture of every other
+  // lookup in this gate.
+  process.stdout.write("UNKNOWN\tbehind latest " + latest + " (pinned v" + pinned + ") but the tag date could not be read");
+} else if (ageDays < warnAt) {
+  process.stdout.write("OK\tpinned v" + pinned + " is " + ageDays + "d old (latest " + latest + ") — inside the " + warnAt + "d window");
+} else if (ageDays < failAt) {
+  process.stdout.write("WARN\tpinned v" + pinned + " is " + ageDays + "d old (latest " + latest + ") — bump within " + (failAt - ageDays) + "d");
 } else {
-  process.stdout.write("FAIL\t" + behind + " minors behind (pinned v" + pinned + ", latest " + latest + ")");
+  process.stdout.write("FAIL\tpinned v" + pinned + " is " + ageDays + "d old (latest " + latest + ") — over the " + failAt + "d limit");
 }
 NODEJS
 
 classify_tag() {
-  # args: pinnedVer latestTag allTags(newline)
-  node -e "$NODE_CLASSIFY_TAG" "$1" "$2" "$3"
+  # args: pinnedVer latestTag allTags(newline) pinnedAgeDays warnDays failDays
+  node -e "$NODE_CLASSIFY_TAG" "$1" "$2" "$3" "$4" "$5" "$6"
 }
 
 # ---------------------------------------------------------------------------
@@ -362,13 +401,27 @@ while IFS=$'\t' read -r tag key val; do
     pinnedver="${ref#v}"
     pinnedver="${pinnedver%%-*}"
     alltags="$(all_tags_for "$repo")"
-    res="$(classify_tag "$pinnedver" "$latest" "$alltags")"
+    # Date the PINNED tag only when it is actually behind — the classifier
+    # short-circuits to OK before this matters, but computing it here keeps the
+    # API call off the common path.
+    pinned_age=""
+    pinned_iso="$(tag_date_for "$repo" "v$pinnedver")"
+    if [ -n "$pinned_iso" ]; then
+      pinned_age="$(node -e '
+        const iso = process.argv[1];
+        const t = Date.parse(iso);
+        if (Number.isNaN(t)) { process.stdout.write(""); }
+        else { process.stdout.write(String(Math.floor((Date.now() - t) / 86400000))); }
+      ' "$pinned_iso")"
+    fi
+    res="$(classify_tag "$pinnedver" "$latest" "$alltags" "$pinned_age" "${RELLO_STALE_PIN_WARN_DAYS:-14}" "${RELLO_STALE_PIN_FAIL_DAYS:-30}")"
     status="${res%%$'\t'*}"
     msg="${res#*$'\t'}"
     case "$status" in
       OK)   REPORT+=("OK    $key  -> $msg");;
       WARN) REPORT+=("WARN  $key  -> $msg");;
       FAIL) REPORT+=("FAIL  $key  -> $msg"); HAS_FAIL=1;;
+      UNKNOWN) REPORT+=("UNKN  $key  -> $msg");;
       *)    REPORT+=("WARN  $key  -> $msg");;
     esac
 

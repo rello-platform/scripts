@@ -445,6 +445,18 @@ PRISMA
   printf 'v2.14.0\nv2.16.0\nv2.18.0\n'           > "$MOCK/api-client.tags"
   printf 'v2.14.0\nv2.16.0\nv2.18.0\n'           > "$MOCK/rello-ui.tags"
 
+  # v0.13.0 — the axis is AGE, so the mock must carry tag DATES. These are
+  # written relative to now so the cells never rot into passing by calendar.
+  _tagdate() { # repo tag daysAgo
+    node -e 'process.stdout.write(new Date(Date.now() - Number(process.argv[1])*86400000).toISOString())' "$3" \
+      > "$MOCK/$1.tagdate.$2"
+  }
+  _tagdate permissions v0.38.0 60    # old AND several minors behind
+  _tagdate permissions v0.39.0 45
+  _tagdate permissions v0.40.0 2     # FRESH but one minor behind
+  _tagdate api-client  v1.9.0  200
+  _tagdate api-client  v2.14.0 5
+
   # csp helper: write a one-dep package.json fixture.
   csp_fixture() {
     local name="$1" dep="$2" val="$3"
@@ -463,13 +475,33 @@ JSON
   csp_fixture csp-ok "@rello-platform/permissions" "github:rello-platform/permissions#v0.41.0"
   assert_exit "OK: current tag (v0.41.0)" "0" "$(csp_run "$TMP/csp-ok")"
 
-  # C2. 1 minor behind — WARN, exit 0
+  # C2. 🔴 THE INVERSION, HALF ONE: behind by a minor but only 2 DAYS OLD -> OK.
+  # Under the old minor-count axis this was WARN, and a 2-minor version of it
+  # was a hard FAIL — which is how four repos that had changed in no way went
+  # from current to push-blocked because a package shipped three times in one
+  # morning.
   csp_fixture csp-warn "@rello-platform/permissions" "github:rello-platform/permissions#v0.40.0"
-  assert_exit "WARN: 1 minor behind (v0.40.0) — exit 0" "0" "$(csp_run "$TMP/csp-warn")"
+  assert_exit "fresh pin (2d old, 1 minor behind) — exit 0" "0" "$(csp_run "$TMP/csp-warn")"
 
-  # C3. >=2 minors behind — FAIL, exit 1
+  # C3. 🔴 THE INVERSION, HALF TWO: 60 DAYS OLD -> FAIL.
+  # Age is the risk. A repo running a gate published two months ago is behind in
+  # the way that matters, however few versions separate it from latest.
   csp_fixture csp-fail "@rello-platform/permissions" "github:rello-platform/permissions#v0.38.0"
-  assert_exit "FAIL: 3 minors behind (v0.38.0) — exit 1" "1" "$(csp_run "$TMP/csp-fail")"
+  assert_exit "stale pin (60d old) — exit 1" "1" "$(csp_run "$TMP/csp-fail")"
+
+  # C3b. 🟢 CONTROL: the message states the AGE, not the version distance —
+  # "3 minors behind" tells a reader nothing they can act on.
+  csp_age_msg="$( cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins 2>&1 || true )"
+  case "$csp_age_msg" in
+    *"is 60d old"*) assert_exit "FAIL message reports AGE in days" "0" "0";;
+    *)              assert_exit "FAIL message reports AGE in days" "0" "1";;
+  esac
+
+  # C3c. threshold is configurable, and raising it above the age clears the FAIL
+  # — proves the verdict is driven by the age comparison and not by something
+  # incidental that happens to correlate with it.
+  assert_exit "raising the fail threshold past the age clears it — exit 0" "0" \
+    "$(cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PIN_FAIL_DAYS=365 RELLO_STALE_PIN_WARN_DAYS=300 "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
 
   # C4. full major behind — FAIL, exit 1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
