@@ -540,6 +540,32 @@ than the guarantee that a pinned artifact never changes. But it moves the entire
 cost of a mistake to the moment of creation, which is why the pre-push gate
 matters more than it looks.
 
+### The worked example: `@rello-platform/signals` v0.28.0
+
+This is not hypothetical. A backfill of 77 published tags across the nine
+package repos — every tag any consumer pins — found exactly one bad artifact:
+
+    signals v0.28.0    dist STALE
+    index.js and index.js.map differ from a fresh build of that tag's own src/
+
+It is live, and it is now unwithdrawable. Everything in this section applies to
+it literally:
+
+- **It cannot be deleted or repointed.** The ruleset refuses both.
+- **It was superseded, not fixed.** v0.29.0 and later already exist and build
+  cleanly, so consumers move forward.
+- **No consumer is affected.** The pin sweep shows consumers on v0.27.0 and
+  v0.30.0; nobody pins v0.28.0. That is luck, not design — the tag was
+  publishable and installable the whole time.
+- **It stays.** A permanent record that one tag shipped output its own source
+  does not produce, which is more useful than a gap where a tag used to be.
+
+Two things it demonstrates about the layers here. `check-dist-fresh` catches
+this shape at push time, but v0.28.0 predates the gate's rollout — prevention
+only covers what came after it. And `audit-published-tags` found it *after the
+fact*, which is the whole argument for keeping a post-hoc detector even once
+every route is gated.
+
 **Emergency exemption.** If a tag genuinely must be removed — leaked credential,
 licence violation — a repository admin can set the ruleset to `enforcement:
 disabled`, delete the tag, and re-enable. That is a deliberate, auditable, two-
