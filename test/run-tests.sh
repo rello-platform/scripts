@@ -533,6 +533,26 @@ JSON
     ' "$TMP/csp-baseline-clean/.stale-pin-baseline.json" )"
   assert_exit "arming a healthy repo records zero pins" "0" "$([ "$csp_bl_n" = "0" ] && echo 0 || echo 1)"
 
+  # C3g. 🔴 THE OPERATOR-FACING LINE MUST NAME THE REAL REASON. After the axis
+  # changed, the header and the failure summary still said ">= 2 minors behind"
+  # — and a reader concluded the age gate had been reverted, settling it only by
+  # reading the decision code. A stale sentence beside live code is a second,
+  # wrong implementation. This pins the summary to the axis so it cannot drift
+  # again silently.
+  csp_sum="$( cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins 2>&1 || true )"
+  case "$csp_sum" in
+    *"minors behind canonical-latest"*) assert_exit "summary does NOT name the retired axis" "0" "1";;
+    *)                                  assert_exit "summary does NOT name the retired axis" "0" "0";;
+  esac
+  case "$csp_sum" in
+    *"too OLD"*) assert_exit "summary names AGE as the reason" "0" "0";;
+    *)           assert_exit "summary names AGE as the reason" "0" "1";;
+  esac
+  case "$csp_sum" in
+    *"--write-baseline"*) assert_exit "summary offers the baseline for pre-existing debt" "0" "0";;
+    *)                    assert_exit "summary offers the baseline for pre-existing debt" "0" "1";;
+  esac
+
   # C4. full major behind — FAIL, exit 1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
   assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"

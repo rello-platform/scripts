@@ -85,14 +85,51 @@ t("an unparseable version is reported, not silently passed", () => {
 
 // ── exports ─────────────────────────────────────────────────────────────────
 
-t("flattens subpaths and conditions into distinct leaves", () => {
+t("flattens to SUBPATHS and CONDITION NAMES, not full condition chains", () => {
   const leaves = flattenExports({
     ".": { import: "./dist/index.js", require: "./dist/index.cjs" },
     "./contracts": "./dist/contracts.js",
   });
+  assert.equal(leaves.has("."), true, "the subpath itself is a leaf");
   assert.equal(leaves.has(". [import]"), true);
   assert.equal(leaves.has(". [require]"), true);
-  assert.equal(leaves.has("./contracts [default]"), true);
+  assert.equal(leaves.has("./contracts"), true, "an unconditional subpath records just the subpath");
+});
+
+t("🔴 THE REAL RESTRUCTURE: dual ESM/CJS is a WIDENING, not a narrowing", () => {
+  // api-client v2.23.0 -> v2.24.0, a healthy published tag. Comparing full
+  // condition CHAINS called this narrowing because top-level `types` left the
+  // key set — it had moved INSIDE import and require. Every package that adds
+  // CJS support makes this change, so a gate that blocks it is a gate that gets
+  // bypassed.
+  const before = { version: "2.23.0", exports: { ".": { types: "./i.d.ts", import: "./i.js" } } };
+  const after = {
+    version: "2.24.0",
+    exports: {
+      ".": {
+        import: { types: "./i.d.ts", default: "./i.js" },
+        require: { types: "./i.d.cts", default: "./i.cjs" },
+      },
+    },
+  };
+  assert.equal(diffManifests(before, after).ok, true, "adding require must not read as narrowing");
+});
+
+t("🟢 CONTROL: the relaxation does not blind it — losing require is still caught", () => {
+  // The motivating incident (2.25.0 -> 2.23.0) lost `require` ENTIRELY. Asking
+  // "is this condition still reachable under this subpath" catches that, while
+  // tolerating a change of depth.
+  const wide = {
+    version: "2.24.0",
+    exports: { ".": { import: { types: "./i.d.ts", default: "./i.js" }, require: { default: "./i.cjs" } } },
+  };
+  const narrow = { version: "2.23.0", exports: { ".": { types: "./i.d.ts", import: "./i.js" } } };
+  const r = diffManifests(wide, narrow);
+  assert.equal(r.ok, false);
+  assert.ok(
+    r.problems.some((p) => p.kind === "exports-narrowed" && /require/.test(p.detail)),
+    "the removed require condition must be named",
+  );
 });
 
 t("🔴 THE REAL INCIDENT: losing the `require` condition is narrowing", () => {

@@ -34,7 +34,19 @@
  *   1. `version` never DECREASES.
  *   2. No manifest entry point present in the baseline disappears
  *      (`main`, `module`, `types`, `typings`, `browser`, `bin` keys).
- *   3. No `exports` path or condition present in the baseline disappears.
+ *   3. No `exports` subpath, and no CONDITION NAME reachable under a subpath,
+ *      disappears.
+ *
+ *      ⚑ BY NAME, NOT BY DEPTH, and that distinction is load-bearing. The dual
+ *      ESM/CJS restructure every package eventually makes —
+ *        { types, import }  ->  { import: {types, default}, require: {...} }
+ *      — is a WIDENING: it adds `require` and keeps everything else reachable.
+ *      Comparing full condition CHAINS reported it as narrowing, because the
+ *      top-level `types` leaf left the key set. That fired on api-client
+ *      v2.24.0, a healthy published tag, and would fire on any package adding
+ *      CJS support. Asking "is this condition still resolvable for this
+ *      subpath" rather than "is it at the same depth" gets both cases right:
+ *      the motivating incident lost `require` ENTIRELY, so it is still caught.
  *   4. `private: true` is not newly added — it does not remove a key, and it
  *      stops the package being publishable at all.
  *   5. VALUE, not just presence: every path `main`/`module`/`types`/`browser`/
@@ -102,36 +114,18 @@ export function flattenExports(exportsValue, subpath = ".", conditions = []) {
   const out = new Set();
   if (exportsValue == null) return out;
 
-  if (typeof exportsValue === "string") {
-    // ⚑ RECORD THE PREFIX CHAIN, NOT JUST THE FULL CHAIN. Restructuring
-    //   "import": "./x.js"            ->  ". [import]"
-    // into
-    //   "import": { types, default }  ->  ". [import>types]", ". [import>default]"
-    // is a WIDENING — the import condition still resolves, and now carries
-    // types. Comparing only full chains made the old leaf ". [import]" look
-    // removed, so every package that adds a types condition would be reported
-    // as narrowing. Emitting each prefix means the old leaf still exists in the
-    // new set and the widening reads correctly.
-    const chain = conditions.length ? conditions : ["default"];
-    for (let i = 1; i <= chain.length; i++) {
-      out.add(`${subpath} [${chain.slice(0, i).join(">")}]`);
-    }
-    return out;
-  }
-  if (Array.isArray(exportsValue)) {
-    // Fallback array — treat as one leaf; losing the whole array is the removal
-    // that matters, not which alternative won.
-    out.add(`${subpath} [${conditions.join(">") || "default"}]`);
+  if (typeof exportsValue === "string" || Array.isArray(exportsValue)) {
+    // A leaf. Record the SUBPATH, plus every condition name on the way here.
+    out.add(`${subpath}`);
+    for (const c of conditions) out.add(`${subpath} [${c}]`);
     return out;
   }
   if (typeof exportsValue !== "object") return out;
 
   for (const [key, value] of Object.entries(exportsValue)) {
     if (key.startsWith(".")) {
-      // A subpath key. Only valid at the top level, but tolerate nesting.
       for (const leaf of flattenExports(value, key, conditions)) out.add(leaf);
     } else {
-      // A condition key ("import", "require", "types", "default", …).
       for (const leaf of flattenExports(value, subpath, [...conditions, key])) out.add(leaf);
     }
   }

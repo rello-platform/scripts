@@ -3,7 +3,7 @@
 #
 # Phase 4 of PLATFORM-PACKAGE-PIN-CONVENTION-AND-VERSION-SYNC. Where
 # `floating-refs` (Phase 0) prevents pin-FORM drift, this prevents pin-VERSION
-# staleness — so no spoke silently falls many minors behind canonical-latest
+# staleness — so no spoke silently runs a months-old pin of canonical-latest
 # again (the "OHH was 38 minors behind permissions" failure class).
 #
 # Runs as a husky pre-push hook (`npx rello-scripts check-stale-pins`), NOT a
@@ -18,20 +18,45 @@
 #   - The repo name is read from the PIN VALUE (`github:rello-platform/<repo>#`),
 #     not the package key — because @rello-platform/ui lives in repo `rello-ui`.
 #
-# Classification (per spec §4 + Build-KA Phase 4 lock):
-#   OK    — current (0 minors behind), or ahead of latest tag
-#   WARN  — exactly 1 minor behind  (surfaced, does NOT block)
-#   FAIL  — >= 2 minors behind, OR a full major behind  (exit 1, blocks push)
-# Exit status: 1 if any dep is FAIL (and not allowlisted); else 0.
-# Prerelease tags (v1.2.3-rc.1) are ignored for staleness counting.
+# Classification — AGE, since v0.13.0. The authoritative logic is the classifier
+# further down; this comment is a summary of it and must be changed with it.
+# It previously described the retired minor-count rule verbatim, and a reader
+# concluded from it that the age gate had been reverted, settling the question
+# only by reading the decision code. A stale comment beside live code is not
+# documentation, it is a second, wrong implementation.
+#
+#   OK      — at/ahead of the latest tag, OR behind but the pinned tag is
+#             younger than the WARN threshold (default 14 days)
+#   WARN    — behind, and the pinned tag is 14-30 days old (does NOT block)
+#   FAIL    — behind, and the pinned tag is >= 30 days old (exit 1, blocks)
+#             OR a full major behind, at any age — a different risk class
+#             (API incompatibility, not rot), and majors are rare and deliberate
+#   DEBT    — would FAIL, but is recorded in .stale-pin-baseline.json at the
+#             SAME version: pre-existing, loud, does not block
+#   UNKNOWN — behind, but the tag could not be dated (offline). Its own outcome,
+#             never folded into OK; does not block, matching the offline posture
+#             of every other lookup here.
+#
+# Thresholds are RELLO_STALE_PIN_WARN_DAYS / RELLO_STALE_PIN_FAIL_DAYS.
+# Exit status: 1 if any dep is FAIL (and not allowlisted or baselined); else 0.
+# Prerelease tags (v1.2.3-rc.1) are ignored.
+#
+# WHY AGE AND NOT VERSION DISTANCE: measured 2026-09-04, @rello-platform/slugs
+# v0.5.0 was 108 DAYS old and 1 minor behind, so it passed as WARN, while
+# @rello-platform/scripts v0.10.0 — published that morning — was 2 minors behind
+# and blocked four repos. The old axis fired hardest on the most actively
+# maintained packages, which is backwards.
 #
 # SHA-pinned deps: a SHA carries no semver. Resolve via
 #       gh api repos/rello-platform/<repo>/compare/<base>...<sha>  ->  .status
 #   - ahead / identical to latest tag        -> OK
 #   - diverged from latest tag               -> WARN + note (manual review)
-#   - behind latest tag, but ahead-of/at the second-newest minor tag -> WARN (1 behind)
-#   - behind the second-newest minor tag too -> FAIL (>= 2 minors behind)
-#   (Bounded to <=3 compare calls; mirrors the FIX-2/Phase-2 ahead/behind logic.)
+#   - behind latest tag, but ahead-of/at the second-newest minor tag -> WARN
+#   - behind the second-newest minor tag too -> FAIL
+#   (Bounded to <=3 compare calls. NOTE: SHA pins are still classified by
+#   DISTANCE, not age — a SHA carries no tag date to read. That asymmetry is
+#   deliberate and worth knowing when a SHA-pinned dep reports differently from
+#   a tag-pinned one.)
 #
 # Exception allowlist — three intentional held pins MUST classify OK
 # (DISCOVERED-PINCONV-PHASE2-INTENTIONAL-PIN-EXCEPTIONS-260524): Rello
@@ -594,7 +619,7 @@ if [ "$WRITE_BASELINE" -eq 1 ]; then
     };
     fs.writeFileSync(".stale-pin-baseline.json", JSON.stringify(out, null, 2) + "\n");
     process.stdout.write("wrote .stale-pin-baseline.json with " + Object.keys(pins).length + " pre-existing stale pin(s)\n");
-  ' -- "${BASELINE_ROWS[@]}"
+    ' -- ${BASELINE_ROWS[@]+"${BASELINE_ROWS[@]}"}
   exit 0
 fi
 
@@ -620,10 +645,14 @@ fi
 
 if [ "$HAS_FAIL" -eq 1 ]; then
   if [ "$PIN_FAIL" -eq 1 ]; then
-    printf '\nFAIL: one or more @rello-platform/* pins are >= 2 minors behind canonical-latest.\n' >&2
+    printf '\nFAIL: one or more @rello-platform/* pins are too OLD (see each line for its age),\nor a full major behind.\n' >&2
     printf 'Bump the FAIL deps to the latest tag (github:rello-platform/<repo>#v<X.Y.Z>),\n' >&2
     printf 'or add an intentional-hold exception (scripts/stale-pin-exceptions.json or the\n' >&2
     printf 'relloStalePinExceptions field in package.json) with a documented reason.\n' >&2
+    printf 'If this is PRE-EXISTING debt rather than something this change introduced, record\n' >&2
+    printf 'it once with:  rello-scripts check-stale-pins --write-baseline\n' >&2
+    printf 'That ledger is dated, printed on every push, records only what is already over\n' >&2
+    printf 'the limit, and can only shrink.\n' >&2
   fi
   if [ "$LOCK_SSH_FAIL" -eq 1 ]; then
     printf '\nFAIL: package-lock.json carries git+ssh resolved entries (Railway-unfetchable).\n' >&2

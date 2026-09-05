@@ -55,6 +55,11 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
+import {
+  collectTargets,
+  diffManifests,
+  missingTargets,
+} from "./check-manifest-regression.mjs";
 import { fileURLToPath } from "node:url";
 
 export const EXIT_OK = 0;
@@ -157,32 +162,6 @@ async function main() {
   } catch {
     /* handled below */
   }
-  // ⚑ --since IS DISABLED, AND THE REASON IS A DEFECT I SHIPPED. This command
-  // delegates the manifest half to check-manifest-regression, which compares the
-  // WORKING TREE against a baseline ref. For the newest tag that is correct —
-  // the tree is that tag. For any HISTORICAL tag it is not: auditing v2.24.0
-  // compared today's tree to v2.23.0 and reported a verdict about neither.
-  //
-  // The first backfill run produced 77 such rows, eight of them reading
-  // "REGRESSION" about api-client tags that were never examined. A detector
-  // that emits confident rows about something it did not look at is worse than
-  // no detector, so this refuses rather than answering.
-  //
-  // The fix is to compare the TAG's manifest and file list without a checkout —
-  // `git show <tag>:package.json` and `git ls-tree -r <tag> --name-only` both
-  // exist for exactly this. Until that lands, only the newest tag is auditable.
-  if (since) {
-    const msg =
-      `UNVERIFIED: --since is disabled.\n` +
-      `  The manifest half compares the WORKING TREE against a baseline ref, which is only\n` +
-      `  correct for the newest tag. For a historical tag it compares today's tree to an old\n` +
-      `  baseline and reports a verdict about neither. Auditing without --since is sound.\n`;
-    json
-      ? emit({ verdict: "UNVERIFIED", reason: "since-unimplemented", message: msg })
-      : process.stderr.write(msg);
-    process.exit(EXIT_UNVERIFIED);
-  }
-
   const selected = selectTags(tags, since);
   if (selected.length === 0) {
     const msg = `UNVERIFIED: no v* tags to audit in ${abs}. A package with no published tag has no artifact to verify — that is not a pass.`;
@@ -232,20 +211,54 @@ async function main() {
       dfReport = null;
     }
 
+    // ⚑ THE TAG'S OWN MANIFEST, NOT THE WORKING TREE'S. The first version of
+    // this delegated to check-manifest-regression, which compares the WORKING
+    // TREE against a baseline ref. That is correct for the newest tag — the
+    // tree IS that tag — and wrong for every historical one: auditing v2.24.0
+    // compared today's v2.26.0 tree to the v2.23.0 baseline and reported a
+    // verdict about neither. It produced 77 confident rows about tags it never
+    // examined before that was caught.
+    //
+    // Both sides now come from git at the ref, with no checkout and no mutation
+    // of the working tree: `git show <ref>:package.json` for the manifest and
+    // `git ls-tree -r <ref> --name-only` for the file list that target
+    // existence is checked against.
     const base = priorTag(tags, tag);
     let mfStatus = 0;
     let mfReport = null;
     if (base) {
-      const mf = spawnSync(
-        process.execPath,
-        [MANIFEST, "--root", abs, "--against", base, "--json"],
-        { encoding: "utf8" },
-      );
-      mfStatus = mf.status ?? 2;
       try {
-        mfReport = JSON.parse(mf.stdout || "{}");
-      } catch {
-        mfReport = null;
+        const curManifest = JSON.parse(git(abs, ["show", `${tag}:package.json`]));
+        const baseManifest = JSON.parse(git(abs, ["show", `${base}:package.json`]));
+        const { problems } = diffManifests(baseManifest, curManifest);
+
+        // Target existence, evaluated against the files present AT THE TAG.
+        const filesAtTag = git(abs, ["ls-tree", "-r", tag, "--name-only"])
+          .split("\n")
+          .filter(Boolean);
+        for (const t of missingTargets(collectTargets(curManifest), filesAtTag)) {
+          problems.push({
+            kind: "target-missing",
+            detail: `${t.field} points at "${t.target}", absent from the tree at ${tag}`,
+          });
+        }
+
+        mfStatus = problems.length === 0 ? 0 : 1;
+        mfReport = { verdict: problems.length === 0 ? "OK" : "REGRESSION", problems };
+      } catch (err) {
+        // Could not read one side. UNVERIFIED, never a pass.
+        mfStatus = 2;
+        mfReport = {
+          verdict: "UNVERIFIED",
+          problems: [
+            {
+              kind: "manifest-unreadable",
+              detail: `cannot read package.json at ${tag} or ${base}: ${
+                err instanceof Error ? err.message.split("\n")[0] : String(err)
+              }`,
+            },
+          ],
+        };
       }
     }
 
