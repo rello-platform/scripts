@@ -103,7 +103,19 @@ export function flattenExports(exportsValue, subpath = ".", conditions = []) {
   if (exportsValue == null) return out;
 
   if (typeof exportsValue === "string") {
-    out.add(`${subpath} [${conditions.join(">") || "default"}]`);
+    // ⚑ RECORD THE PREFIX CHAIN, NOT JUST THE FULL CHAIN. Restructuring
+    //   "import": "./x.js"            ->  ". [import]"
+    // into
+    //   "import": { types, default }  ->  ". [import>types]", ". [import>default]"
+    // is a WIDENING — the import condition still resolves, and now carries
+    // types. Comparing only full chains made the old leaf ". [import]" look
+    // removed, so every package that adds a types condition would be reported
+    // as narrowing. Emitting each prefix means the old leaf still exists in the
+    // new set and the widening reads correctly.
+    const chain = conditions.length ? conditions : ["default"];
+    for (let i = 1; i <= chain.length; i++) {
+      out.add(`${subpath} [${chain.slice(0, i).join(">")}]`);
+    }
     return out;
   }
   if (Array.isArray(exportsValue)) {

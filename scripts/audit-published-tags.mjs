@@ -157,6 +157,32 @@ async function main() {
   } catch {
     /* handled below */
   }
+  // ⚑ --since IS DISABLED, AND THE REASON IS A DEFECT I SHIPPED. This command
+  // delegates the manifest half to check-manifest-regression, which compares the
+  // WORKING TREE against a baseline ref. For the newest tag that is correct —
+  // the tree is that tag. For any HISTORICAL tag it is not: auditing v2.24.0
+  // compared today's tree to v2.23.0 and reported a verdict about neither.
+  //
+  // The first backfill run produced 77 such rows, eight of them reading
+  // "REGRESSION" about api-client tags that were never examined. A detector
+  // that emits confident rows about something it did not look at is worse than
+  // no detector, so this refuses rather than answering.
+  //
+  // The fix is to compare the TAG's manifest and file list without a checkout —
+  // `git show <tag>:package.json` and `git ls-tree -r <tag> --name-only` both
+  // exist for exactly this. Until that lands, only the newest tag is auditable.
+  if (since) {
+    const msg =
+      `UNVERIFIED: --since is disabled.\n` +
+      `  The manifest half compares the WORKING TREE against a baseline ref, which is only\n` +
+      `  correct for the newest tag. For a historical tag it compares today's tree to an old\n` +
+      `  baseline and reports a verdict about neither. Auditing without --since is sound.\n`;
+    json
+      ? emit({ verdict: "UNVERIFIED", reason: "since-unimplemented", message: msg })
+      : process.stderr.write(msg);
+    process.exit(EXIT_UNVERIFIED);
+  }
+
   const selected = selectTags(tags, since);
   if (selected.length === 0) {
     const msg = `UNVERIFIED: no v* tags to audit in ${abs}. A package with no published tag has no artifact to verify — that is not a pass.`;
