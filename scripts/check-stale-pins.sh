@@ -409,6 +409,47 @@ BASELINE_FILE=".stale-pin-baseline.json"
 # WRITE_BASELINE is set by the argument loop above; default it only if unset.
 : "${WRITE_BASELINE:=0}"
 
+# The pin value for a package as it stands on the BASE branch — i.e. what it was
+# before this push. Empty when the package is absent there, or when the base
+# cannot be read.
+#
+# ⚑ THIS IS THE WHOLE NET-NEW DISCRIMINATOR. Time passing is not something a
+# pusher did. A pin that ages past the threshold while nobody touched it must
+# not become the problem of whoever pushes next — that is an ambush, it picks
+# its victim at random, and it lands mid-unrelated-work. A pin the push ADDS or
+# MOVES BACKWARDS is drift this push introduced, and that still fails.
+#
+# Same shape as every other armed guard in this platform: check:signal-types,
+# check:audit-actions, check:metric-keys and check:tenant-scope-throws all block
+# on drift the push introduces and grandfather the standing residual. This gate
+# was the only one blocking on total state, and that was the defect.
+BASE_REF="${RELLO_STALE_PINS_BASE_REF:-origin/main}"
+BASE_PKG_JSON=""
+BASE_PKG_READ=0
+read_base_pkg() {
+  [ "$BASE_PKG_READ" -eq 1 ] && return 0
+  BASE_PKG_READ=1
+  BASE_PKG_JSON="$(git show "$BASE_REF:package.json" 2>/dev/null || echo "")"
+}
+
+base_pin_for() {
+  local key="$1"
+  read_base_pkg
+  [ -z "$BASE_PKG_JSON" ] && { echo "__BASE_UNREADABLE__"; return 0; }
+  printf '%s' "$BASE_PKG_JSON" | node -e '
+    const fs = require("fs");
+    let raw = "";
+    try { raw = fs.readFileSync(0, "utf8"); } catch { process.stdout.write(""); process.exit(0); }
+    let d; try { d = JSON.parse(raw); } catch { process.stdout.write(""); process.exit(0); }
+    const key = process.argv[1];
+    for (const sec of ["dependencies", "devDependencies", "optionalDependencies"]) {
+      const v = (d[sec] || {})[key];
+      if (v) { process.stdout.write(String(v)); process.exit(0); }
+    }
+    process.stdout.write("");
+  ' "$key"
+}
+
 baseline_version_for() {
   # echoes the baselined version for a package key, or "" if not baselined
   local key="$1"
@@ -497,11 +538,34 @@ while IFS=$'\t' read -r tag key val; do
       WARN) REPORT+=("WARN  $key  -> $msg");;
       FAIL)
         bv="$(baseline_version_for "$key")"
+        basepin="$(base_pin_for "$key")"
         if [ -n "$bv" ] && [ "$bv" = "$pinnedver" ]; then
-          # Pre-existing debt, recorded and dated. Loud, not blocking.
+          # Explicitly recorded debt. Loud, not blocking.
           REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]")
+        elif [ "$basepin" = "__BASE_UNREADABLE__" ]; then
+          # ⚑ FAIL-CLOSED, AND THIS DIRECTION IS DELIBERATE. Auto-absorption
+          # requires POSITIVE PROOF that the pin is unchanged. "I could not read
+          # the base branch" is not that proof, and absorbing on its absence is
+          # exactly how a gate degrades into a logger: every unreadable base
+          # would silently forgive every stale pin. So an undecidable net-new
+          # blocks, and says why.
+          REPORT+=("FAIL  $key  -> $msg  [cannot read $BASE_REF:package.json — cannot prove this aged in place]")
+          HAS_FAIL=1
+        elif [ -n "$basepin" ] && [ "${basepin##*#}" = "$ref" ]; then
+          # ⚑ AUTO-ABSORBED. Identical to the base branch: this push did not
+          # touch it, it merely aged. Dated debt, printed every push, does not
+          # block. Whoever owns the dependency owes the bump; whoever pushes
+          # next does not.
+          REPORT+=("DEBT  $key  -> $msg  [aged in place, not introduced by this push]")
         else
-          REPORT+=("FAIL  $key  -> $msg"); HAS_FAIL=1
+          # The push ADDED this pin, or MOVED it to an older version. That is
+          # drift this push introduced, and it fails — which is what keeps this
+          # a gate rather than a logger.
+          if [ -z "$basepin" ]; then
+            REPORT+=("FAIL  $key  -> $msg  [ADDED by this push]"); HAS_FAIL=1
+          else
+            REPORT+=("FAIL  $key  -> $msg  [CHANGED by this push: ${basepin##*#} -> $ref]"); HAS_FAIL=1
+          fi
         fi
         BASELINE_ROWS+=("$key|$pinnedver")
         ;;

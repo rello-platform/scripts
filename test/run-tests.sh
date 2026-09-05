@@ -574,6 +574,49 @@ JSON
     *) assert_exit "lockfile message names --fix as the remedy" "0" "1";;
   esac
 
+  # ── NET-NEW, NOT TOTAL STATE (v0.18.0) ────────────────────────────────────
+  # A pin that ages past the threshold while nobody touched it must not become
+  # the problem of whoever pushes next. That ambush picks its victim at random
+  # and lands mid-unrelated-work — measured: four blocked pushes across three
+  # agents in one day, one of them mid-PR on an unrelated nurture fix.
+  #
+  # The discriminator is the BASE BRANCH pin, not the baseline file: identical
+  # to base means this push did not touch it.
+  csp_netnew() {  # fixture, basePin, currentPin -> exit code
+    local d="$TMP/$1"; mkdir -p "$d/base"
+    ( cd "$d" && git init -q 2>/dev/null || true )
+    printf '{"name":"f","dependencies":{"@rello-platform/permissions":"%s"}}\n' "$2" > "$d/base-package.json"
+    printf '{"name":"f","dependencies":{"@rello-platform/permissions":"%s"}}\n' "$3" > "$d/package.json"
+    ( cd "$d" && git add -A >/dev/null 2>&1 && git -c user.email=t@t -c user.name=t commit -qm base >/dev/null 2>&1 || true )
+    ( cd "$d" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF="$4" "$CLI" check-stale-pins >/dev/null 2>&1; echo $? )
+  }
+
+  # C9. 🔴 AGED IN PLACE — base and current identical, both stale -> does NOT block.
+  mkdir -p "$TMP/nn-aged"
+  ( cd "$TMP/nn-aged" && git init -q
+    printf '{"name":"f","dependencies":{"@rello-platform/permissions":"github:rello-platform/permissions#v0.38.0"}}\n' > package.json
+    git add -A && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+  assert_exit "aged in place (base == current) does NOT block — exit 0" "0" \
+    "$(cd "$TMP/nn-aged" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
+
+  # C10. 🟢 CONTROL — THE GATE IS NOT A LOGGER. The push MOVES the pin to an
+  # older stale version -> still FAILS. If this passed, every FAIL would
+  # self-absorb and the gate would have stopped being a gate.
+  ( cd "$TMP/nn-aged" && printf '{"name":"f","dependencies":{"@rello-platform/permissions":"github:rello-platform/permissions#v0.39.0"}}\n' > package.json
+    git add -A && git -c user.email=t@t -c user.name=t commit -qm newer
+    printf '{"name":"f","dependencies":{"@rello-platform/permissions":"github:rello-platform/permissions#v0.38.0"}}\n' > package.json ) >/dev/null 2>&1
+  assert_exit "push MOVES a pin to an older stale version — exit 1" "1" \
+    "$(cd "$TMP/nn-aged" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
+
+  # C11. 🟢 CONTROL — a stale pin ADDED by this push (absent from base) FAILS.
+  mkdir -p "$TMP/nn-added"
+  ( cd "$TMP/nn-added" && git init -q
+    printf '{"name":"f","dependencies":{}}\n' > package.json
+    git add -A && git -c user.email=t@t -c user.name=t commit -qm empty
+    printf '{"name":"f","dependencies":{"@rello-platform/permissions":"github:rello-platform/permissions#v0.38.0"}}\n' > package.json ) >/dev/null 2>&1
+  assert_exit "push ADDS an already-stale pin — exit 1" "1" \
+    "$(cd "$TMP/nn-added" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
+
   # C4. full major behind — FAIL, exit 1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
   assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"
