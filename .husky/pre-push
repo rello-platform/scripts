@@ -4,6 +4,10 @@
 # behavior-parity harness + floating-refs dogfood (mirrors the old ci.yml jobs).
 # No-prepare install (git-dep-safe, matches existing .husky/pre-commit precedent).
 # Enable once per clone:  git config core.hooksPath .husky
+#
+# git feeds the ref list on stdin; capture it FIRST, before `npm test` can
+# consume it, so the tag gate at the bottom still sees `refs/tags/v*`.
+_refs=$(cat)
 npm test
 
 # ── lockfile git+ssh gate ────────────────────────────────────────────────────
@@ -21,3 +25,12 @@ npm test
 # Requires exit 0. Offenders (exit 1) block; an unparseable lockfile (exit 2)
 # blocks too — "could not tell" is not "fine". No `|| true`.
 npx --yes "github:rello-platform/scripts#v0.10.0" check-lockfile-ssh
+
+# ── tag-dist-gate (dogfood, v0.19.0) ─────────────────────────────────────────
+# Every sibling package wires this through `npx github:rello-platform/scripts`;
+# this repo ships the gate and never ran it on itself. It fires only on a
+# `refs/tags/v*` push. This package has no build step and no committed dist/,
+# which `.dist-fresh-exempt` declares by name and reason — the gate still runs
+# the manifest-regression check and refuses a malformed exemption. Requires
+# exit 0; UNVERIFIED (2) blocks unless exempt. No `|| true`.
+printf '%s\n' "$_refs" | node scripts/tag-dist-gate.mjs
