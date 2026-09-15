@@ -54,8 +54,11 @@
 #   - behind latest tag, but ahead-of/at the second-newest minor tag -> WARN
 #   - behind the second-newest minor tag too -> FAIL
 #   (Bounded to <=3 compare calls. NOTE: SHA pins are still classified by
-#   DISTANCE, not age — a SHA carries no tag date to read. That asymmetry is
-#   deliberate and worth knowing when a SHA-pinned dep reports differently from
+#   DISTANCE, not age — a SHA carries no tag date to read. Since v0.19.0 (A-09)
+#   a stale SHA then goes through the SAME net-new discriminator as a tag
+#   (baselined / aged in place / added-or-changed / base unreadable); before
+#   that it set HAS_FAIL directly and nothing could absorb it. The distance
+#   asymmetry remains and is worth knowing when a SHA-pinned dep reports differently from
 #   a tag-pinned one.)
 #
 # Exception allowlist — three intentional held pins MUST classify OK
@@ -469,6 +472,54 @@ declare -a BASELINE_ROWS=()
 HAS_FAIL=0
 declare -a REPORT=()
 
+# ---------------------------------------------------------------------------
+# The net-new discriminator — ONE function, used by the tag branch AND the SHA
+# branch (A-09, v0.19.0). Before v0.19.0 this logic was inlined in the tag
+# branch only; the SHA branch set HAS_FAIL=1 directly, so a SHA pin that aged
+# in place ambushed the next pusher and no ledger entry could absorb it.
+#
+#   classify_fail <key> <ref> <recordable-version> <msg>
+#     baselined at <recordable-version>       -> DEBT  [baselined]
+#     base branch unreadable                  -> FAIL  (fail-closed — see below)
+#     identical to the base branch pin        -> DEBT  [aged in place]
+#     absent from / different on the base     -> FAIL  [ADDED | CHANGED by this push]
+#   Always collects the pin for --write-baseline.
+# ---------------------------------------------------------------------------
+classify_fail() {
+  local key="$1" ref="$2" recver="$3" msg="$4" bv basepin
+  bv="$(baseline_version_for "$key")"
+  basepin="$(base_pin_for "$key")"
+  if [ -n "$bv" ] && [ "$bv" = "$recver" ]; then
+    # Explicitly recorded debt. Loud, not blocking.
+    REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]")
+  elif [ "$basepin" = "__BASE_UNREADABLE__" ]; then
+    # ⚑ FAIL-CLOSED, AND THIS DIRECTION IS DELIBERATE. Auto-absorption
+    # requires POSITIVE PROOF that the pin is unchanged. "I could not read
+    # the base branch" is not that proof, and absorbing on its absence is
+    # exactly how a gate degrades into a logger: every unreadable base
+    # would silently forgive every stale pin. So an undecidable net-new
+    # blocks, and says why.
+    REPORT+=("FAIL  $key  -> $msg  [cannot read $BASE_REF:package.json — cannot prove this aged in place]")
+    HAS_FAIL=1
+  elif [ -n "$basepin" ] && [ "${basepin##*#}" = "$ref" ]; then
+    # ⚑ AUTO-ABSORBED. Identical to the base branch: this push did not
+    # touch it, it merely aged. Dated debt, printed every push, does not
+    # block. Whoever owns the dependency owes the bump; whoever pushes
+    # next does not.
+    REPORT+=("DEBT  $key  -> $msg  [aged in place, not introduced by this push]")
+  else
+    # The push ADDED this pin, or MOVED it to an older version. That is
+    # drift this push introduced, and it fails — which is what keeps this
+    # a gate rather than a logger.
+    if [ -z "$basepin" ]; then
+      REPORT+=("FAIL  $key  -> $msg  [ADDED by this push]"); HAS_FAIL=1
+    else
+      REPORT+=("FAIL  $key  -> $msg  [CHANGED by this push: ${basepin##*#} -> $ref]"); HAS_FAIL=1
+    fi
+  fi
+  BASELINE_ROWS+=("$key|$recver")
+}
+
 # Extract repo + ref from a canonical-ish pin value.
 #   github:rello-platform/<repo>#<ref>
 #   git+https://github.com/rello-platform/<repo>.git#<ref>
@@ -537,37 +588,7 @@ while IFS=$'\t' read -r tag key val; do
       OK)   REPORT+=("OK    $key  -> $msg");;
       WARN) REPORT+=("WARN  $key  -> $msg");;
       FAIL)
-        bv="$(baseline_version_for "$key")"
-        basepin="$(base_pin_for "$key")"
-        if [ -n "$bv" ] && [ "$bv" = "$pinnedver" ]; then
-          # Explicitly recorded debt. Loud, not blocking.
-          REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]")
-        elif [ "$basepin" = "__BASE_UNREADABLE__" ]; then
-          # ⚑ FAIL-CLOSED, AND THIS DIRECTION IS DELIBERATE. Auto-absorption
-          # requires POSITIVE PROOF that the pin is unchanged. "I could not read
-          # the base branch" is not that proof, and absorbing on its absence is
-          # exactly how a gate degrades into a logger: every unreadable base
-          # would silently forgive every stale pin. So an undecidable net-new
-          # blocks, and says why.
-          REPORT+=("FAIL  $key  -> $msg  [cannot read $BASE_REF:package.json — cannot prove this aged in place]")
-          HAS_FAIL=1
-        elif [ -n "$basepin" ] && [ "${basepin##*#}" = "$ref" ]; then
-          # ⚑ AUTO-ABSORBED. Identical to the base branch: this push did not
-          # touch it, it merely aged. Dated debt, printed every push, does not
-          # block. Whoever owns the dependency owes the bump; whoever pushes
-          # next does not.
-          REPORT+=("DEBT  $key  -> $msg  [aged in place, not introduced by this push]")
-        else
-          # The push ADDED this pin, or MOVED it to an older version. That is
-          # drift this push introduced, and it fails — which is what keeps this
-          # a gate rather than a logger.
-          if [ -z "$basepin" ]; then
-            REPORT+=("FAIL  $key  -> $msg  [ADDED by this push]"); HAS_FAIL=1
-          else
-            REPORT+=("FAIL  $key  -> $msg  [CHANGED by this push: ${basepin##*#} -> $ref]"); HAS_FAIL=1
-          fi
-        fi
-        BASELINE_ROWS+=("$key|$pinnedver")
+        classify_fail "$key" "$ref" "$pinnedver" "$msg"
         ;;
       UNKNOWN) REPORT+=("UNKN  $key  -> $msg");;
       *)    REPORT+=("WARN  $key  -> $msg");;
@@ -610,7 +631,12 @@ while IFS=$'\t' read -r tag key val; do
           elif [ "$st2" = "ahead" ] || [ "$st2" = "identical" ]; then
             REPORT+=("WARN  $key  -> SHA ~1 minor behind (>= $prevtag, < latest $latest)")
           else
-            REPORT+=("FAIL  $key  -> SHA >= 2 minors behind (< $prevtag; latest $latest)"); HAS_FAIL=1
+            # A-09 (v0.19.0): the SHA is judged like a tag from here — the
+            # ledger may record it (version = the SHA), an identical pin on
+            # the base branch aged in place, and only a push that added or
+            # moved it fails. Distance is still what makes it stale (a SHA has
+            # no tag date); the discriminator decides who owns it.
+            classify_fail "$key" "$ref" "$ref" "SHA >= 2 minors behind (< $prevtag; latest $latest)"
           fi
         fi
         ;;
@@ -655,34 +681,68 @@ fi
 # ---------------------------------------------------------------------------
 # 5b. --write-baseline: record today's over-threshold pins, once, per repo.
 #
-# Writes only what is CURRENTLY over the threshold, with the age at recording
-# and the date. It never records a healthy pin, so arming cannot silently widen
-# the exemption, and the file is a debt ledger a reader can diff over time.
+# Writes only what is CURRENTLY over the threshold, with the date. It never
+# records a healthy pin, so arming cannot silently widen the exemption, and the
+# file is a debt ledger a reader can diff over time.
+#
+# ⚑ A-08 (v0.19.0): the writer MERGES into an existing ledger, it does not
+# replace it. v0.18.0 emitted a fixed {version, recordedAt} per entry and a
+# tool-default _comment, and one run on MarketIntel-NEW deleted
+# ageDaysAtArming / latestAtArming / why and the hand-written "56 of 70 pins"
+# rationale (md5 9ecb79d3… → 10340948…). Rules, in order:
+#   - an entry recorded at the SAME version is untouched — recordedAt included,
+#     because the recorded date IS the debt's age and resetting it would erase it;
+#   - an entry recorded at a DIFFERENT version is re-recorded: version and
+#     recordedAt move, every other key on the entry is kept;
+#   - a pin the ledger does not know is added as {version, recordedAt};
+#   - entries the run did not collect are LEFT ALONE — shrinking the ledger is a
+#     human's act, never this writer's;
+#   - _comment and every other top-level key are preserved; the default
+#     _comment is written only when the file has none.
 # ---------------------------------------------------------------------------
 if [ "$WRITE_BASELINE" -eq 1 ]; then
   node -e '
     const fs = require("fs");
     // ⚑ slice(1), NOT slice(2). Under `node -e`, argv[0] is the node binary and
     // argv[1] is the FIRST user argument — there is no script path to skip.
-    // slice(2) silently dropped exactly one entry, which is invisible unless
-    // you count: arming reported 2 pins where 3 had been collected.
     const rows = process.argv.slice(1).filter(Boolean);
-    const pins = {};
+    const today = new Date().toISOString().slice(0, 10);
+    const FILE = ".stale-pin-baseline.json";
+    const DEFAULT_COMMENT =
+      "Pre-existing stale pins, recorded when check-stale-pins was armed on the AGE axis. " +
+      "Each entry WARNs on every push and does not block. Bumping the pin makes the entry " +
+      "stale and it should be deleted; a baselined pin that is bumped and then allowed to go " +
+      "stale again FAILS, because the recorded version no longer matches. This file can only " +
+      "shrink.";
+    let existing = null;
+    if (fs.existsSync(FILE)) {
+      try { existing = JSON.parse(fs.readFileSync(FILE, "utf8")); }
+      catch (e) {
+        // A ledger that cannot be parsed is not one this writer may replace.
+        process.stderr.write("[write-baseline] refusing to overwrite an unparseable " + FILE + ": " + e.message + "\n");
+        process.exit(2);
+      }
+    }
+    const out = existing && typeof existing === "object" && !Array.isArray(existing) ? existing : {};
+    if (typeof out._comment !== "string") out._comment = DEFAULT_COMMENT;
+    if (!out.pins || typeof out.pins !== "object" || Array.isArray(out.pins)) out.pins = {};
+    let added = 0, rerecorded = 0, unchanged = 0;
     for (const r of rows) {
       const [key, version] = r.split("|");
-      if (key && version) pins[key] = { version, recordedAt: new Date().toISOString().slice(0, 10) };
+      if (!key || !version) continue;
+      const cur = out.pins[key];
+      if (cur && typeof cur === "object" && cur.version === version) { unchanged++; continue; }
+      if (cur && typeof cur === "object") { cur.version = version; cur.recordedAt = today; rerecorded++; continue; }
+      out.pins[key] = { version, recordedAt: today }; added++;
     }
-    const out = {
-      _comment:
-        "Pre-existing stale pins, recorded when check-stale-pins was armed on the AGE axis. " +
-        "Each entry WARNs on every push and does not block. Bumping the pin makes the entry " +
-        "stale and it should be deleted; a baselined pin that is bumped and then allowed to go " +
-        "stale again FAILS, because the recorded version no longer matches. This file can only " +
-        "shrink.",
-      pins,
-    };
-    fs.writeFileSync(".stale-pin-baseline.json", JSON.stringify(out, null, 2) + "\n");
-    process.stdout.write("wrote .stale-pin-baseline.json with " + Object.keys(pins).length + " pre-existing stale pin(s)\n");
+    const kept = Object.keys(out.pins).length - added - rerecorded - unchanged;
+    const text = JSON.stringify(out, null, 2) + "\n";
+    const before = existing !== null ? fs.readFileSync(FILE, "utf8") : null;
+    if (before !== text) fs.writeFileSync(FILE, text);
+    process.stdout.write(
+      (before === text ? "left " : "wrote ") + FILE + " — " + rows.length + " pre-existing stale pin(s) collected: " +
+      added + " added, " + rerecorded + " re-recorded, " + unchanged + " already recorded" +
+      (kept > 0 ? ", " + kept + " other entr" + (kept === 1 ? "y" : "ies") + " left alone" : "") + "\n");
     ' -- ${BASELINE_ROWS[@]+"${BASELINE_ROWS[@]}"}
   exit 0
 fi
@@ -707,9 +767,26 @@ if [ -n "$LOCK_SSH_OUTPUT" ]; then
   fi
 fi
 
+# A-01 (v0.19.0): the final line states what the run FOUND. Until v0.19.0 the
+# exit-0 line asserted "all pins within 1 minor of canonical-latest" — the
+# retired distance axis — beside DEBT lines twelve minors behind and WARN lines
+# three minors behind (closeout audit S1, ledger C-04). Counts are read from
+# the report itself, so this line cannot drift from the per-dep lines above it.
+N_FAIL=0; N_DEBT=0; N_WARN=0; N_OK=0
+for line in ${REPORT[@]+"${REPORT[@]}"}; do
+  case "$line" in
+    FAIL*) N_FAIL=$((N_FAIL + 1));;
+    DEBT*) N_DEBT=$((N_DEBT + 1));;
+    WARN*|UNKN*) N_WARN=$((N_WARN + 1));;
+    OK*)   N_OK=$((N_OK + 1));;
+  esac
+done
+COUNTS="FAIL: $N_FAIL · DEBT: $N_DEBT · WARN: $N_WARN · OK: $N_OK"
+
 if [ "$HAS_FAIL" -eq 1 ]; then
   if [ "$PIN_FAIL" -eq 1 ]; then
-    printf '\nFAIL: one or more @rello-platform/* pins are too OLD (see each line for its age),\nor a full major behind.\n' >&2
+    printf '\nFAIL — %s\n' "$COUNTS" >&2
+    printf 'One or more @rello-platform/* pins are too OLD (see each line for its age),\nor a full major behind, and this push ADDED or CHANGED them (or the base branch could not be read).\n' >&2
     printf 'Bump the FAIL deps to the latest tag (github:rello-platform/<repo>#v<X.Y.Z>),\n' >&2
     printf 'or add an intentional-hold exception (scripts/stale-pin-exceptions.json or the\n' >&2
     printf 'relloStalePinExceptions field in package.json) with a documented reason.\n' >&2
@@ -725,5 +802,9 @@ if [ "$HAS_FAIL" -eq 1 ]; then
   exit 1
 fi
 
-printf '\nOK: all @rello-platform/* pins within 1 minor of canonical-latest (WARN/UNKNOWN do not block); no git+ssh lockfile entries.\n'
+if [ "$N_DEBT" -gt 0 ]; then
+  printf '\nOK — %s. No stale pin was introduced by this push; the %d DEBT line(s) above are pre-existing and printed every push until bumped. WARN/UNKNOWN do not block; no git+ssh lockfile entries.\n' "$COUNTS" "$N_DEBT"
+else
+  printf '\nOK — %s. No @rello-platform/* pin is over the age limit or a major behind. WARN/UNKNOWN do not block; no git+ssh lockfile entries.\n' "$COUNTS"
+fi
 exit 0

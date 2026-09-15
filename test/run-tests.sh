@@ -533,6 +533,70 @@ JSON
     ' "$TMP/csp-baseline-clean/.stale-pin-baseline.json" )"
   assert_exit "arming a healthy repo records zero pins" "0" "$([ "$csp_bl_n" = "0" ] && echo 0 || echo 1)"
 
+  # ── A-08 (v0.19.0): --write-baseline MERGES, it does not overwrite ───────
+  # Measured 2026-09-05 on MarketIntel-NEW: the writer emitted a fixed
+  # {version, recordedAt} per entry and replaced the top-level _comment, so one
+  # run deleted ageDaysAtArming / latestAtArming / why and the hand-written
+  # "56 of 70 pins" rationale (md5 9ecb79d3… → 10340948…). Two repos carry such
+  # content. The writer must touch only version/recordedAt on pins it records,
+  # keep every other key of every entry, keep _comment, and never drop an entry
+  # it did not author.
+  printf '
+check-stale-pins --write-baseline merges (A-08, v0.19.0)
+'
+  _tagdate rello-ui v2.14.0 95     # stale: the ledger fixture below records it
+  mkdir -p "$TMP/a08"
+  cat > "$TMP/a08/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/ui": "github:rello-platform/rello-ui#v2.14.0" } }
+JSON
+  # MarketIntel-NEW's real ledger shape (values abbreviated, keys verbatim).
+  cat > "$TMP/a08/.stale-pin-baseline.json" <<'JSON'
+{
+  "_comment": "DEBT LEDGER, not configuration. Arming cold would have failed 56 of 70 pins across 15 repos — a stop-work order, not a gate.",
+  "pins": {
+    "@rello-platform/ui": {
+      "version": "2.14.0",
+      "recordedAt": "2026-09-05",
+      "ageDaysAtArming": 89,
+      "latestAtArming": "2.29.0",
+      "why": "89 days old when this ledger was armed on 2026-09-05, past the 30-day limit."
+    }
+  }
+}
+JSON
+  a08_md5_before="$(md5 -q "$TMP/a08/.stale-pin-baseline.json" 2>/dev/null || md5sum "$TMP/a08/.stale-pin-baseline.json" | cut -d' ' -f1)"
+  ( cd "$TMP/a08" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins --write-baseline >/dev/null 2>&1 )
+  a08_md5_after="$(md5 -q "$TMP/a08/.stale-pin-baseline.json" 2>/dev/null || md5sum "$TMP/a08/.stale-pin-baseline.json" | cut -d' ' -f1)"
+  # C12. 🔴 A re-run over a ledger that already records the same pin at the same
+  # version is a NO-OP: byte-identical file (so recordedAt is not reset either —
+  # resetting it would erase the debt's age, which is the ledger's whole point).
+  assert_exit "A-08: re-arming an already-recorded pin leaves the ledger byte-identical" "0"     "$([ "$a08_md5_before" = "$a08_md5_after" ] && echo 0 || echo 1)"
+  a08_keys="$( node -e '
+      const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const e=(b.pins||{})["@rello-platform/ui"]||{};
+      process.stdout.write([b._comment&&b._comment.includes("56 of 70")?"comment":"", e.ageDaysAtArming===89?"age":"", e.latestAtArming==="2.29.0"?"latest":"", typeof e.why==="string"?"why":"", e.recordedAt==="2026-09-05"?"recordedAt":""].filter(Boolean).join(","));
+    ' "$TMP/a08/.stale-pin-baseline.json" )"
+  assert_exit "A-08: hand-authored keys + _comment + recordedAt survive --write-baseline" "0"     "$([ "$a08_keys" = "comment,age,latest,why,recordedAt" ] && echo 0 || echo 1)"
+  # C13. 🟢 CONTROL — the writer still WRITES: a stale pin the ledger does not
+  # yet record is added beside the preserved entry, and an entry recorded at a
+  # different version is re-recorded (version + recordedAt only, other keys kept).
+  cat > "$TMP/a08/package.json" <<'JSON'
+{ "name": "fixture", "dependencies": { "@rello-platform/ui": "github:rello-platform/rello-ui#v2.14.0", "@rello-platform/permissions": "github:rello-platform/permissions#v0.38.0" } }
+JSON
+  ( cd "$TMP/a08" && node -e '
+      const fs=require("fs"); const b=JSON.parse(fs.readFileSync(".stale-pin-baseline.json","utf8"));
+      b.pins["@rello-platform/ui"].version="2.10.0"; b.extraTopLevel="kept";
+      fs.writeFileSync(".stale-pin-baseline.json", JSON.stringify(b,null,2)+"\n");
+    ' )
+  ( cd "$TMP/a08" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins --write-baseline >/dev/null 2>&1 )
+  a08_merge="$( node -e '
+      const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8"));
+      const ui=(b.pins||{})["@rello-platform/ui"]||{}, pm=(b.pins||{})["@rello-platform/permissions"]||{};
+      const today=new Date().toISOString().slice(0,10);
+      process.stdout.write([ui.version==="2.14.0"?"ui-rerecorded":"", ui.recordedAt===today?"ui-redated":"", ui.why?"ui-why-kept":"", ui.ageDaysAtArming===89?"ui-age-kept":"", pm.version==="0.38.0"&&pm.recordedAt===today?"perm-added":"", b.extraTopLevel==="kept"?"toplevel-kept":"", b._comment&&b._comment.includes("56 of 70")?"comment-kept":""].filter(Boolean).join(","));
+    ' "$TMP/a08/.stale-pin-baseline.json" )"
+  assert_exit "A-08: re-record at a new version + add a new pin, keeping every other key" "0"     "$([ "$a08_merge" = "ui-rerecorded,ui-redated,ui-why-kept,ui-age-kept,perm-added,toplevel-kept,comment-kept" ] && echo 0 || echo 1)"
+
   # C3g. 🔴 THE OPERATOR-FACING LINE MUST NAME THE REAL REASON. After the axis
   # changed, the header and the failure summary still said ">= 2 minors behind"
   # — and a reader concluded the age gate had been reverted, settling it only by
@@ -541,8 +605,12 @@ JSON
   # again silently.
   csp_sum="$( cd "$TMP/csp-fail" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins 2>&1 || true )"
   case "$csp_sum" in
-    *"minors behind canonical-latest"*) assert_exit "summary does NOT name the retired axis" "0" "1";;
-    *)                                  assert_exit "summary does NOT name the retired axis" "0" "0";;
+    *"minor"*"canonical-latest"*) assert_exit "summary does NOT name the retired axis" "0" "1";;
+    *)                            assert_exit "summary does NOT name the retired axis" "0" "0";;
+  esac
+  case "$csp_sum" in
+    *"FAIL: 1"*) assert_exit "A-01: FAIL summary carries the FAIL count" "0" "0";;
+    *)           assert_exit "A-01: FAIL summary carries the FAIL count" "0" "1";;
   esac
   case "$csp_sum" in
     *"too OLD"*) assert_exit "summary names AGE as the reason" "0" "0";;
@@ -617,9 +685,120 @@ JSON
   assert_exit "push ADDS an already-stale pin — exit 1" "1" \
     "$(cd "$TMP/nn-added" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins >/dev/null 2>&1; echo $?)"
 
-  # C4. full major behind — FAIL, exit 1
+  # ── A-09 (v0.19.0): SHA PINS GO THROUGH THE SAME DISCRIMINATOR AS TAGS ──
+  # Measured 2026-09-05 (pre-flight §4): the SHA branch set HAS_FAIL=1 directly
+  # on ">= 2 minors behind", skipping the baseline and the base-branch check —
+  # a SHA pin that aged in place ambushed the next pusher and no ledger entry
+  # could absorb it (exit 1 with and without one). PathfinderPro and Rello both
+  # carry SHA pins. Same four outcomes as a tag: identical to origin/main →
+  # DEBT [aged in place]; baselined at that SHA → DEBT; added/changed by this
+  # push → FAIL; base unreadable → FAIL (fail-closed, as tags).
+  printf '\ncheck-stale-pins SHA pins use the net-new discriminator (A-09, v0.19.0)\n'
+  A09_SHA="3d21e6116143367ac99cac9a244b24dca7616ac2"   # "the v2.14.0 commit": 2 minors behind v2.18.0
+  A09_NEW="552bdadb0000000000000000000000000000c0de"   # another SHA the push could move to
+  printf 'behind\n' > "$MOCK/api-client.compare.v2.18.0...$A09_SHA"
+  printf 'behind\n' > "$MOCK/api-client.compare.v2.16.0...$A09_SHA"
+  printf 'behind\n' > "$MOCK/api-client.compare.v2.18.0...$A09_NEW"
+  printf 'behind\n' > "$MOCK/api-client.compare.v2.16.0...$A09_NEW"
+  a09_pkg() { printf '{"name":"f","dependencies":{"@rello-platform/api-client":"github:rello-platform/api-client#%s"}}\n' "$1"; }
+  a09_run() { ( cd "$1" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF="${2:-HEAD}" "$CLI" check-stale-pins 2>&1; echo "EXIT=$?" ); }
+
+  # C14. 🔴 AGED IN PLACE — the SHA pin is identical on the base branch → DEBT, exit 0.
+  mkdir -p "$TMP/a09-aged"
+  ( cd "$TMP/a09-aged" && git init -q && a09_pkg "$A09_SHA" > package.json \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -qm base ) >/dev/null 2>&1
+  a09_out="$(a09_run "$TMP/a09-aged")"
+  assert_exit "A-09: SHA pin identical to base branch → exit 0" "0" "$(printf '%s' "$a09_out" | sed -n 's/^EXIT=//p')"
+  case "$a09_out" in *"DEBT  @rello-platform/api-client"*"aged in place"*) assert_exit "A-09: … and is reported as DEBT [aged in place]" "0" "0";; *) assert_exit "A-09: … and is reported as DEBT [aged in place]" "0" "1";; esac
+
+  # C15. 🟢 CONTROL — the push CHANGES the SHA (to another stale one) → FAIL, exit 1.
+  ( cd "$TMP/a09-aged" && a09_pkg "$A09_NEW" > package.json )
+  a09_out="$(a09_run "$TMP/a09-aged")"
+  assert_exit "A-09: SHA pin CHANGED by this push → exit 1" "1" "$(printf '%s' "$a09_out" | sed -n 's/^EXIT=//p')"
+  case "$a09_out" in *"FAIL  @rello-platform/api-client"*"CHANGED by this push"*) assert_exit "A-09: … and names CHANGED by this push" "0" "0";; *) assert_exit "A-09: … and names CHANGED by this push" "0" "1";; esac
+  ( cd "$TMP/a09-aged" && a09_pkg "$A09_SHA" > package.json )
+
+  # C16. 🟢 CONTROL — a stale SHA pin ADDED by this push → FAIL, exit 1.
+  mkdir -p "$TMP/a09-added"
+  ( cd "$TMP/a09-added" && git init -q && printf '{"name":"f","dependencies":{}}\n' > package.json \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -qm empty && a09_pkg "$A09_SHA" > package.json ) >/dev/null 2>&1
+  assert_exit "A-09: stale SHA pin ADDED by this push → exit 1" "1" "$(a09_run "$TMP/a09-added" | sed -n 's/^EXIT=//p')"
+
+  # C17. 🔴 BASELINED — a ledger entry recording that SHA absorbs it (pre-flight §2.3 case B), even when the base is unreadable.
+  mkdir -p "$TMP/a09-baselined"
+  a09_pkg "$A09_SHA" > "$TMP/a09-baselined/package.json"        # not a git repo → base unreadable
+  printf '{"pins":{"@rello-platform/api-client":{"version":"%s","recordedAt":"2026-09-05"}}}\n' "$A09_SHA" > "$TMP/a09-baselined/.stale-pin-baseline.json"
+  a09_out="$(a09_run "$TMP/a09-baselined" origin/main)"
+  assert_exit "A-09: baselined SHA pin → exit 0" "0" "$(printf '%s' "$a09_out" | sed -n 's/^EXIT=//p')"
+  case "$a09_out" in *"DEBT  @rello-platform/api-client"*"baselined"*) assert_exit "A-09: … reported as DEBT [baselined]" "0" "0";; *) assert_exit "A-09: … reported as DEBT [baselined]" "0" "1";; esac
+
+  # C18. 🟢 CONTROL — base unreadable and NOT baselined → FAIL-CLOSED, exit 1 (as tags).
+  mkdir -p "$TMP/a09-unreadable"
+  a09_pkg "$A09_SHA" > "$TMP/a09-unreadable/package.json"
+  a09_out="$(a09_run "$TMP/a09-unreadable" origin/main)"
+  assert_exit "A-09: base unreadable, not baselined → exit 1 (fail-closed)" "1" "$(printf '%s' "$a09_out" | sed -n 's/^EXIT=//p')"
+  case "$a09_out" in *"cannot read origin/main:package.json"*) assert_exit "A-09: … and says why" "0" "0";; *) assert_exit "A-09: … and says why" "0" "1";; esac
+
+  # C19. 🔴 --write-baseline RECORDS a stale SHA pin (so the ledger can carry it).
+  cp -R "$TMP/a09-unreadable" "$TMP/a09-arm"
+  ( cd "$TMP/a09-arm" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins --write-baseline >/dev/null 2>&1 )
+  a09_rec="$( node -e 'const b=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); process.stdout.write(String((b.pins||{})["@rello-platform/api-client"]?.version||""))' "$TMP/a09-arm/.stale-pin-baseline.json" 2>/dev/null )"
+  assert_exit "A-09: --write-baseline records the SHA pin" "0" "$([ "$a09_rec" = "$A09_SHA" ] && echo 0 || echo 1)"
+
+  # C20. 🟢 CONTROL — the allowlist path is untouched: Rello's real EX-1 shape
+  # (scripts/stale-pin-exceptions.json, key → reason string) still short-circuits
+  # a SHA pin to OK allowlisted before any lookup. D-18: this entry is the only
+  # thing between Rello's api-client SHA pin and a hard FAIL.
+  mkdir -p "$TMP/a09-ex1/scripts"
+  a09_pkg "$A09_SHA" > "$TMP/a09-ex1/package.json"
+  cat > "$TMP/a09-ex1/scripts/stale-pin-exceptions.json" <<'JSON'
+{
+  "@rello-platform/api-client": "EX-1 intentional hold: pinned to the v2.19.0 commit (ahead of latest tag v2.18.0; adds getOvenBaseUrl()) — no v2.19.0 git tag exists yet, so this cannot be a tag pin. Bumping to v2.18.0 would be a downgrade. See DISCOVERED-PINCONV-PHASE2-INTENTIONAL-PIN-EXCEPTIONS-260524 (EX-1)."
+}
+JSON
+  a09_out="$(a09_run "$TMP/a09-ex1" origin/main)"
+  assert_exit "A-09: EX-1 allowlist shape still classifies OK allowlisted → exit 0" "0" "$(printf '%s' "$a09_out" | sed -n 's/^EXIT=//p')"
+  case "$a09_out" in *"OK    @rello-platform/api-client  -> allowlisted: EX-1"*) assert_exit "A-09: … with the allowlisted reason line" "0" "0";; *) assert_exit "A-09: … with the allowlisted reason line" "0" "1";; esac
+
+  # C4. full major behind — in a REAL git fixture with a readable base (A-01,
+  # v0.19.0). Until v0.19.0 this fixture was not a git repo, so the run landed
+  # on the fail-closed __BASE_UNREADABLE__ path and the test passed for a
+  # reason unrelated to its name (closeout audit S1 / ledger C-04). Two cells:
+  #   C4a — the major-behind pin is ADDED by this push → FAIL, exit 1, summary says FAIL: 1.
+  #   C4b — the same pin identical on the base branch → today ABSORBED as DEBT,
+  #         exit 0. ⚑ That is A-02 (ledger; OPEN): the header promises a full
+  #         major behind FAILs at any age. This cell DOCUMENTS the current
+  #         behaviour so the summary is at least truthful about it; flip it to
+  #         exit 1 when A-02 lands.
+  mkdir -p "$TMP/csp-major"
+  ( cd "$TMP/csp-major" && git init -q && printf '{"name":"f","dependencies":{}}\n' > package.json \
+    && git add -A && git -c user.email=t@t -c user.name=t commit -qm empty ) >/dev/null 2>&1
   csp_fixture csp-major "@rello-platform/api-client" "github:rello-platform/api-client#v1.9.0"
-  assert_exit "FAIL: 1 major behind (v1.9.0 < v2.18.0) — exit 1" "1" "$(csp_run "$TMP/csp-major")"
+  c4a_out="$( cd "$TMP/csp-major" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins 2>&1; echo "EXIT=$?" )"
+  assert_exit "C4a: 1 major behind, ADDED by this push — exit 1" "1" "$(printf '%s' "$c4a_out" | sed -n 's/^EXIT=//p')"
+  case "$c4a_out" in *"FAIL: 1"*) assert_exit "A-01: FAIL summary counts what the run found (FAIL: 1)" "0" "0";; *) assert_exit "A-01: FAIL summary counts what the run found (FAIL: 1)" "0" "1";; esac
+  ( cd "$TMP/csp-major" && git add -A && git -c user.email=t@t -c user.name=t commit -qm pin ) >/dev/null 2>&1
+  c4b_out="$( cd "$TMP/csp-major" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins 2>&1; echo "EXIT=$?" )"
+  assert_exit "C4b: 1 major behind, aged in place — absorbed as DEBT today (A-02 open) — exit 0" "0" "$(printf '%s' "$c4b_out" | sed -n 's/^EXIT=//p')"
+
+  # ── A-01 (v0.19.0): THE SUCCESS LINE STATES WHAT THE RUN FOUND ────────────
+  # check-stale-pins.sh:728 @ 2946cd0 printed "OK: all @rello-platform/* pins
+  # within 1 minor of canonical-latest" on every exit-0 run — beside a DEBT
+  # line 12 minors behind, or a WARN "inside the 14d window" 3 minors behind.
+  # The final line must carry the counts (FAIL · DEBT · WARN) and claim OK only
+  # when FAIL = 0; it must never assert the retired distance axis.
+  printf '\ncheck-stale-pins summary states counts (A-01, v0.19.0)\n'
+  # C21. 🔴 an exit-0 run carrying a DEBT: summary says DEBT: 1, never "within 1 minor".
+  case "$c4b_out" in *"within 1 minor"*) assert_exit "A-01: exit-0 summary does NOT claim 'within 1 minor'" "0" "1";; *) assert_exit "A-01: exit-0 summary does NOT claim 'within 1 minor'" "0" "0";; esac
+  case "$c4b_out" in *"OK"*"FAIL: 0"*"DEBT: 1"*) assert_exit "A-01: exit-0 summary reads OK … FAIL: 0 · DEBT: 1" "0" "0";; *) assert_exit "A-01: exit-0 summary reads OK … FAIL: 0 · DEBT: 1" "0" "1";; esac
+  # C22. 🔴 closeout Probe A: a FRESH tag 3 minors behind is a per-dep OK/WARN and must not be summarised as "within 1 minor".
+  csp_fixture csp-probe-a "@rello-platform/permissions" "github:rello-platform/permissions#v0.40.0"
+  pa_out="$( cd "$TMP/csp-probe-a" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" "$CLI" check-stale-pins 2>&1; echo "EXIT=$?" )"
+  assert_exit "Probe A: fresh tag one minor behind — exit 0" "0" "$(printf '%s' "$pa_out" | sed -n 's/^EXIT=//p')"
+  case "$pa_out" in *"within 1 minor"*) assert_exit "A-01: Probe-A summary does NOT claim 'within 1 minor'" "0" "1";; *) assert_exit "A-01: Probe-A summary does NOT claim 'within 1 minor'" "0" "0";; esac
+  case "$pa_out" in *"FAIL: 0"*) assert_exit "A-01: Probe-A summary carries FAIL: 0" "0" "0";; *) assert_exit "A-01: Probe-A summary carries FAIL: 0" "0" "1";; esac
+  # C23. 🟢 CONTROL — the FAIL path never prints an OK line.
+  case "$c4a_out" in *$'\nOK'*) assert_exit "A-01: a run with a FAIL prints no OK line" "0" "1";; *) assert_exit "A-01: a run with a FAIL prints no OK line" "0" "0";; esac
 
   # C5. allowlisted via sidecar scripts/stale-pin-exceptions.json — exit 0
   mkdir -p "$TMP/csp-allow-side/scripts"
