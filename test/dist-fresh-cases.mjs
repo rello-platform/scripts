@@ -21,6 +21,7 @@ import {
   EXIT_FRESH,
   EXIT_STALE,
   EXIT_UNVERIFIED,
+  resolveBuildScript,
 } from "../scripts/check-dist-fresh.mjs";
 
 let pass = 0;
@@ -211,6 +212,14 @@ t("an exemption for a DIFFERENT package does not apply", () => {
     gate.isExempt({ verdict: "UNVERIFIED", reason: "no-build-script", packageName: "p", exemptions }),
     false,
   );
+});
+
+t("resolveBuildScript prefers `compile` (outside pacote's nested-install trigger set), falls back to `build`, null when neither (C-33)", () => {
+  assert.deepEqual(resolveBuildScript({ scripts: { compile: "tsup", build: "tsup" } }), { name: "compile", command: "tsup" });
+  assert.deepEqual(resolveBuildScript({ scripts: { build: "tsc -p ." } }), { name: "build", command: "tsc -p ." });
+  assert.equal(resolveBuildScript({ scripts: { test: "node --test" } }), null);
+  assert.equal(resolveBuildScript({ scripts: { compile: "   " } }), null);
+  assert.equal(resolveBuildScript({}), null);
 });
 
 process.stdout.write(`\n  ${pass} passed, ${fail} failed\n`);

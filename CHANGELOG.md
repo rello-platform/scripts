@@ -4,6 +4,11 @@ Versions before 0.19.0 are recorded in their tag messages and commit subjects
 (`git log --format='%h %s' v0.4.0..v0.18.0`); this file starts with the first
 fix pass whose defects were catalogued by ledger id.
 
+## v0.20.0 — 2026-09-16 — `check-dist-fresh` reproduces from `compile` (C-33)
+
+- `resolveBuildScript(pkg)` (exported): prefers `scripts.compile`, falls back to `scripts.build`, `null` when neither. The gate runs `npm run <that name>` and names it in its report (`buildScriptName`) and fix line.
+- Why: pacote (npm's git fetcher) runs a nested, lockfile-less `npm install` inside every git dependency whose manifest carries `build | prepare | prepack | postinstall | install | preinstall` (`pacote/lib/git.js #prepareDir`). On 2026-09-16 13:32Z one such install resolved `rolldown@latest` during a registry 404 and failed PathfinderPro's and Rello's builds on a docs-only merge. Packages rename `build → compile` (outside that list); this release lets the tag gate follow the rename. Until a package converts, `build` still verifies.
+
 ## v0.19.0 — 2026-09-15 — the three-defect fix pass (ledger C-03 / C-04 / C-05)
 
 `check-stale-pins` only. No consumer is bumped by this release; the rollout is

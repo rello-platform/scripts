@@ -165,6 +165,23 @@ export const EXEMPTABLE_REASONS = new Set([
   UNVERIFIED_REASONS.NO_COMMITTED_DIST,
 ]);
 
+/**
+ * Which npm script reproduces dist/. C-33 (2026-09-16): packages name it
+ * `compile`, not `build` — pacote (npm's git fetcher) runs a nested, lockfile-
+ * less `npm install` inside every git dependency whose manifest carries
+ * build | prepare | prepack | postinstall | install | preinstall
+ * (pacote/lib/git.js #prepareDir), and one such install resolved a transient
+ * 404 on rolldown@latest into two failed app builds. `compile` is outside that
+ * list. `build` is still honoured so a package that has not converted yet is
+ * still verifiable; a package with neither is UNVERIFIED (never a pass).
+ */
+export function resolveBuildScript(pkg) {
+  const scripts = pkg?.scripts ?? {};
+  if (typeof scripts.compile === "string" && scripts.compile.trim()) return { name: "compile", command: scripts.compile };
+  if (typeof scripts.build === "string" && scripts.build.trim()) return { name: "build", command: scripts.build };
+  return null;
+}
+
 let JSON_MODE = false;
 
 function fail(msg, reason = UNVERIFIED_REASONS.INTERNAL, code = EXIT_UNVERIFIED) {
@@ -218,12 +235,13 @@ function main() {
   const pkgPath = path.join(root, "package.json");
   if (!fs.existsSync(pkgPath)) fail(`UNVERIFIED: no package.json at ${root}`, UNVERIFIED_REASONS.NO_PACKAGE_JSON);
   const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
-  const buildScript = pkg.scripts?.build;
+  const build = resolveBuildScript(pkg);
+  const buildScript = build?.command;
   const label = `${pkg.name ?? path.basename(root)}@${pkg.version ?? "?"}`;
 
-  if (!buildScript) {
+  if (!build) {
     fail(
-      `UNVERIFIED: ${label} has no "scripts.build" — nothing to reproduce from.`,
+      `UNVERIFIED: ${label} has neither "scripts.compile" nor "scripts.build" — nothing to reproduce from.`,
       UNVERIFIED_REASONS.NO_BUILD_SCRIPT,
     );
   }
@@ -308,7 +326,7 @@ function main() {
     const builds = [];
     for (const attempt of [1, 2]) {
       fs.rmSync(path.join(srcDir, "dist"), { recursive: true, force: true });
-      const built = spawnSync("npm", ["run", "build"], { cwd: srcDir, encoding: "utf8" });
+      const built = spawnSync("npm", ["run", build.name], { cwd: srcDir, encoding: "utf8" });
       if (built.status !== 0) {
         cleanup();
         fail(
@@ -332,6 +350,7 @@ function main() {
       version: pkg.version ?? null,
       ref: treeish,
       buildScript,
+      buildScriptName: build.name,
       committedFiles: committed.size,
       builtFiles: builds[0].size,
       deterministic,
@@ -363,7 +382,7 @@ function main() {
           report.extra.map((f) => `  produced but not committed: dist/${f}`).join("\n") +
           (report.extra.length ? "\n" : "") +
           `  Every consumer installing this ref receives the committed output, not this build.\n` +
-          `  Fix: npm run build && git add dist && commit, then re-tag.\n`,
+          `  Fix: npm run ${build.name} && git add dist && commit, then re-tag.\n`,
       );
     } else {
       process.stdout.write(
