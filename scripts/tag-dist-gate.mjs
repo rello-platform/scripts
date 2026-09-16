@@ -225,7 +225,7 @@ function main() {
           (report?.missing ?? []).map((f) => `      committed but not produced: dist/${f}\n`).join("") +
           (report?.extra ?? []).map((f) => `      produced but not committed: dist/${f}\n`).join("") +
           `\n  Every consumer pinning ${tag} would install the committed bytes, not this build.\n` +
-          `  Fix:  npm run build && git add dist && git commit --amend  (then re-tag)\n\n`,
+          `  Fix:  npm run compile (or build) && git add dist && git commit --amend  (then re-tag)\n\n`,
       );
     } else {
       process.stderr.write(
