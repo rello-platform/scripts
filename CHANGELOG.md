@@ -4,6 +4,14 @@ Versions before 0.19.0 are recorded in their tag messages and commit subjects
 (`git log --format='%h %s' v0.4.0..v0.18.0`); this file starts with the first
 fix pass whose defects were catalogued by ledger id.
 
+## v0.20.2 — 2026-09-17 — `check-stale-pins`: the header now matches the code on aged-in-place majors (A-02)
+
+`check-stale-pins` only. No consumer is bumped by this release.
+
+- **A-02 — the header promised what the code does not do, and the code was right.** The header said a full major behind "FAILs at any age," but a major behind is FAIL-*class* and passes through the same net-new discriminator as every other FAIL: a major that AGED IN PLACE (identical on the base branch) is absorbed as DEBT, and only a major this push ADDED or CHANGED blocks. That is correct — blocking the next pusher for a stale major they did not introduce is the v0.6.0 distance-gate defect again. Fixed the header + the `classify_tag` comment to state the real rule (aged-in-place major → DEBT, loud; added/changed major → FAIL), and broadened the DEBT definition to name the aged-in-place case (it had only listed the baselined one).
+- A major DEBT line now carries `— MAJOR behind — bump deliberately; breaking changes likely`, so a reader does not treat an aged-in-place major like a routine minor.
+- Test C4b asserted this as "current behaviour (A-02 open) … flip to exit 1 when A-02 lands." It now asserts it as the DESIGNED behaviour (exit 0, a DEBT line carrying the MAJOR note, summary `FAIL: 0 · DEBT: 1`). No behaviour change to the gate — this release makes the documentation and the test tell the truth the code already told.
+
 ## v0.20.0 — 2026-09-16 — `check-dist-fresh` reproduces from `compile` (C-33)
 
 - `resolveBuildScript(pkg)` (exported): prefers `scripts.compile`, falls back to `scripts.build`, `null` when neither. The gate runs `npm run <that name>` and names it in its report (`buildScriptName`) and fix line.

@@ -28,11 +28,19 @@
 #   OK      — at/ahead of the latest tag, OR behind but the pinned tag is
 #             younger than the WARN threshold (default 14 days)
 #   WARN    — behind, and the pinned tag is 14-30 days old (does NOT block)
-#   FAIL    — behind, and the pinned tag is >= 30 days old (exit 1, blocks)
-#             OR a full major behind, at any age — a different risk class
-#             (API incompatibility, not rot), and majors are rare and deliberate
-#   DEBT    — would FAIL, but is recorded in .stale-pin-baseline.json at the
-#             SAME version: pre-existing, loud, does not block
+#   FAIL    — behind, and the pinned tag is >= 30 days old (exit 1, blocks);
+#             OR a full major behind (a different risk class — API
+#             incompatibility, not rot; majors are rare and deliberate).
+#             A major is NOT exempt from the net-new discriminator: like every
+#             FAIL it is FAIL only when this push ADDED or CHANGED the pin. A
+#             major that AGED IN PLACE (identical on the base branch) is DEBT,
+#             not FAIL — blocking the next pusher for a stale major they did not
+#             introduce is the v0.6.0 distance-gate defect again.
+#   DEBT    — would FAIL, but this push did not introduce it: either recorded in
+#             .stale-pin-baseline.json at the SAME version, OR the pin is
+#             identical on the base branch (aged in place). Pre-existing, loud,
+#             printed every push, does not block. A major DEBT line also carries
+#             "MAJOR behind — bump deliberately; breaking changes likely".
 #   UNKNOWN — behind, but the tag could not be dated (offline). Its own outcome,
 #             never folded into OK; does not block, matching the offline posture
 #             of every other lookup here.
@@ -336,7 +344,10 @@ if (cmp(p, l) >= 0) {
   process.exit(0);
 }
 
-// A full major behind is always FAIL.
+// A full major behind is FAIL-class — a distinct risk from age-rot. It is
+// emitted as FAIL here, but the net-new discriminator (classify_fail, below)
+// still absorbs a major that aged in place on the base branch as DEBT; only a
+// major this push added or changed blocks.
 if (p.maj < l.maj) {
   process.stdout.write("FAIL\t" + (l.maj - p.maj) + " major(s) behind (pinned v" + pinned + ", latest " + latest + ")");
   process.exit(0);
@@ -486,12 +497,15 @@ declare -a REPORT=()
 #   Always collects the pin for --write-baseline.
 # ---------------------------------------------------------------------------
 classify_fail() {
-  local key="$1" ref="$2" recver="$3" msg="$4" bv basepin
+  local key="$1" ref="$2" recver="$3" msg="$4" bv basepin major_note=""
   bv="$(baseline_version_for "$key")"
   basepin="$(base_pin_for "$key")"
+  # A major behind is a breaking-change risk, not rot — say so on the DEBT line
+  # so a reader does not treat an aged-in-place major like a routine minor.
+  case "$msg" in *"major(s) behind"*) major_note="  — MAJOR behind — bump deliberately; breaking changes likely";; esac
   if [ -n "$bv" ] && [ "$bv" = "$recver" ]; then
     # Explicitly recorded debt. Loud, not blocking.
-    REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]")
+    REPORT+=("DEBT  $key  -> $msg  [baselined — pre-existing, must shrink]$major_note")
   elif [ "$basepin" = "__BASE_UNREADABLE__" ]; then
     # ⚑ FAIL-CLOSED, AND THIS DIRECTION IS DELIBERATE. Auto-absorption
     # requires POSITIVE PROOF that the pin is unchanged. "I could not read
@@ -506,7 +520,7 @@ classify_fail() {
     # touch it, it merely aged. Dated debt, printed every push, does not
     # block. Whoever owns the dependency owes the bump; whoever pushes
     # next does not.
-    REPORT+=("DEBT  $key  -> $msg  [aged in place, not introduced by this push]")
+    REPORT+=("DEBT  $key  -> $msg  [aged in place, not introduced by this push]$major_note")
   else
     # The push ADDED this pin, or MOVED it to an older version. That is
     # drift this push introduced, and it fails — which is what keeps this

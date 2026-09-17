@@ -765,11 +765,13 @@ JSON
   # on the fail-closed __BASE_UNREADABLE__ path and the test passed for a
   # reason unrelated to its name (closeout audit S1 / ledger C-04). Two cells:
   #   C4a — the major-behind pin is ADDED by this push → FAIL, exit 1, summary says FAIL: 1.
-  #   C4b — the same pin identical on the base branch → today ABSORBED as DEBT,
-  #         exit 0. ⚑ That is A-02 (ledger; OPEN): the header promises a full
-  #         major behind FAILs at any age. This cell DOCUMENTS the current
-  #         behaviour so the summary is at least truthful about it; flip it to
-  #         exit 1 when A-02 lands.
+  #   C4b — the same pin identical on the base branch (aged in place) → DEBT,
+  #         exit 0. ⚑ A-02 (RESOLVED v0.20.2): a major is FAIL-class but NOT
+  #         exempt from the net-new discriminator — a major that aged in place
+  #         was not introduced by this push, so blocking the next pusher for it
+  #         is the v0.6.0 defect again. The header now states this; the old
+  #         "flip to exit 1 when A-02 lands" was the wrong resolution. This cell
+  #         asserts the DESIGNED behaviour: exit 0, DEBT, carrying the MAJOR note.
   mkdir -p "$TMP/csp-major"
   ( cd "$TMP/csp-major" && git init -q && printf '{"name":"f","dependencies":{}}\n' > package.json \
     && git add -A && git -c user.email=t@t -c user.name=t commit -qm empty ) >/dev/null 2>&1
@@ -779,7 +781,11 @@ JSON
   case "$c4a_out" in *"FAIL: 1"*) assert_exit "A-01: FAIL summary counts what the run found (FAIL: 1)" "0" "0";; *) assert_exit "A-01: FAIL summary counts what the run found (FAIL: 1)" "0" "1";; esac
   ( cd "$TMP/csp-major" && git add -A && git -c user.email=t@t -c user.name=t commit -qm pin ) >/dev/null 2>&1
   c4b_out="$( cd "$TMP/csp-major" && RELLO_STALE_PINS_MOCK_DIR="$MOCK" RELLO_STALE_PINS_BASE_REF=HEAD "$CLI" check-stale-pins 2>&1; echo "EXIT=$?" )"
-  assert_exit "C4b: 1 major behind, aged in place — absorbed as DEBT today (A-02 open) — exit 0" "0" "$(printf '%s' "$c4b_out" | sed -n 's/^EXIT=//p')"
+  assert_exit "C4b: 1 major behind, aged in place — DEBT by design, not FAIL (A-02) — exit 0" "0" "$(printf '%s' "$c4b_out" | sed -n 's/^EXIT=//p')"
+  # A-02: the aged-in-place major is a DEBT line (not FAIL) and carries the MAJOR note.
+  case "$c4b_out" in *"DEBT  @rello-platform/api-client"*"aged in place"*) assert_exit "C4b: aged-in-place major is a DEBT line" "0" "0";; *) assert_exit "C4b: aged-in-place major is a DEBT line" "0" "1";; esac
+  case "$c4b_out" in *"MAJOR behind — bump deliberately; breaking changes likely"*) assert_exit "C4b: the major DEBT line carries the MAJOR-bump note" "0" "0";; *) assert_exit "C4b: the major DEBT line carries the MAJOR-bump note" "0" "1";; esac
+  case "$c4b_out" in *"FAIL: 0"*"DEBT: 1"*) assert_exit "C4b: summary reads FAIL: 0 · DEBT: 1 for the aged-in-place major" "0" "0";; *) assert_exit "C4b: summary reads FAIL: 0 · DEBT: 1 for the aged-in-place major" "0" "1";; esac
 
   # ── A-01 (v0.19.0): THE SUCCESS LINE STATES WHAT THE RUN FOUND ────────────
   # check-stale-pins.sh:728 @ 2946cd0 printed "OK: all @rello-platform/* pins
